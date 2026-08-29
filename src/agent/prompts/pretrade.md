@@ -4,8 +4,13 @@ You called `trading.execute(...)`. That **staged** a draft — nothing was submi
 Work through every check that applies, state the verdict for each (PASS / FAIL / N/A)
 in your next `thought`, then confirm or revise.
 
-- **Confirm:** call `trading.execute(...)` again with an identical intent.
+- **Confirm:** this is now a later model program; call `trading.execute(...)` once
+  with the identical persisted intent.
 - **Revise:** call it with a corrected intent, which stages a new draft.
+
+Do not call `trading.execute` twice in this program. `awaiting_confirmation` means
+the host refused a same-program confirmation; `restaged` means fresh quotes replaced
+an expired draft and another model program must review it.
 
 ## Economics
 

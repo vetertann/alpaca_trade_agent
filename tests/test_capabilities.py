@@ -1,6 +1,7 @@
 """Host-side logic that does not need a broker."""
 import pytest
 from agent.host.capabilities import _diverse
+from agent.host.capabilities import Capabilities
 from agent.quant import candidates as cd
 
 
@@ -32,3 +33,14 @@ def test_diverse_handles_fewer_candidates_than_the_limit():
 
 def test_diverse_on_empty_input():
     assert _diverse([], 5) == []
+
+
+def test_enumerate_empty_result_keeps_the_documented_shape():
+    caps = object.__new__(Capabilities)
+    caps.params = type("Params", (), {"max_spread_pct_of_mid": 20.0})()
+    caps._options_tradeable_chain = lambda *args, **kwargs: []
+    caps._market_spot = lambda symbol: 100.0
+    out = caps._options_enumerate("SPY", "2026-09-03", "2026-09-03")
+    assert out == {"spot": 100.0, "generated": 0, "kept": 0, "families": [],
+                   "note": "no tradeable contracts under the liquidity gate for that range",
+                   "candidates": []}

@@ -13,6 +13,8 @@ untested until Monday:
 - an order filling
 - the repricing ladder in `manage_fill`
 - the rolling series producing an intraday realized-vol figure
+- **whether multi-leg `filled_qty` counts spreads or leg-contracts**, which
+  `realised_pnl` assumes is spreads
 
 The warm-up protocol below exists to compress that risk into the fifteen minutes
 before entries open, on the dev account.
@@ -22,7 +24,7 @@ before entries open, on the dev account.
 ```bash
 cd /Users/ivan/Documents/Hackatons/Alpaca
 set -a; . ./.env; set +a
-.venv/bin/python -m pytest tests/ -q          # expect 169 passed
+.venv/bin/python -m pytest tests/ -q          # expect 267 passed
 ```
 
 Confirm the competition account is still untouched — this must read zero:
@@ -82,6 +84,43 @@ It prints a GO/NO-GO. Do not start the competition agent on a NO-GO.
 
 Expect a partial pass at 09:30 and a full pass by 09:40 — the rolling series needs a
 few minutes of quotes before it has anything to report.
+
+## 09:32 ET — fill probe, before anything else trades
+
+The warm-up check submits a deliberately non-marketable order and cancels it, so it
+proves the submit and cancel path and nothing about fills. One question needs a real
+fill to answer:
+
+> Does Alpaca report multi-leg `filled_qty` in **spreads** or in **leg-contracts**?
+
+`ledger._signed_fill` assumes spreads. If it is aggregate leg-contracts, realised
+P&L is overstated by the sum of the leg ratios — doubled on a 1:1 vertical,
+quadrupled on a unit-ratio condor — and the 12% realised-loss throttle trips at a
+fraction of its intended threshold.
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/fill_probe.py --confirm
+```
+
+Development account only; it refuses the competition profile and refuses to run
+while the market is closed. It buys one 1-wide SPY call spread at a marketable
+limit, records the parent `qty`/`filled_qty`, every leg's `ratio_qty`/`qty`/
+`filled_qty`, and the complete raw broker response to `.run/fill_probe.json`, then
+flattens.
+
+It prints one of three verdicts:
+
+| Verdict | Meaning | Action |
+|---|---|---|
+| `spreads` | `filled_qty` equals the submitted qty | nothing to change |
+| `leg-contracts` | `filled_qty` equals qty × total leg ratio | derive completed structures as `min(leg filled_qty / ratio_qty)` before going live |
+| `unrecognised` | neither | read the raw response in `.run/fill_probe.json` and do not trade on the ledger's P&L until it is understood |
+
+The probe refuses a non-empty development order book, cancels nonterminal entry and
+exit orders, and derives cleanup quantity from the positions endpoint in a
+`finally` block. If anything remains, it says so explicitly — **flatten the
+development account by hand before continuing**, since a stray position there
+distorts every later reconciliation test.
 
 ## 09:35 ET — calibrate, before the first entry
 
@@ -192,10 +231,22 @@ inspection tool must read the trace rather than open its own stream.
 PYTHONPATH=src .venv/bin/python scripts/panel.py --run-dir .run/live --port 3001
 ```
 
-Equity, P&L against the $100,000 start, session state, cycle count, an equity line
-with the starting balance dotted across it, open positions, and the decision log
-grouped by cycle — trigger, the agent's reasoning in full, collapsed machine output,
-and the outcome.
+Left column: equity, P&L against the $100,000 start, session state, cycle count, an
+equity line with the starting balance dotted across it, open positions, the shadow
+baselines ranked by return, and model usage with Anthropic cost.
+
+Right column: the decision log grouped by cycle — trigger, the agent's reasoning in
+full, collapsed machine output, and the outcome. It runs to the bottom of the
+viewport, so a taller screen shows more cycles rather than more whitespace.
+
+The baselines table is the comparison the evidence rests on: four fixed policies
+reading the same live quotes, placing no orders, so the final equity number can be
+read against a control instead of in isolation.
+
+Each policy re-enters through the week — it settles at expiry against the underlying
+and opens again the next session — so `trades` should climb across the window. A
+baseline stuck at one trade after Tuesday means settlement is not firing and the
+comparison is measuring a single Monday position.
 
 Read-only and separate from the agent, so it cannot affect a trade. On the server it
 binds loopback; reach it through an SSH tunnel rather than opening a port.
@@ -219,6 +270,30 @@ binds loopback; reach it through an SSH tunnel rather than opening a port.
 | stream `disconnected` | feed dropped | it reconnects with backoff; if persistent, restart the process |
 | `NO_TRADE` every cycle | gates are refusing, or the model is declining | read the `reason` in the trace — a declining model names the gate |
 | every cycle `EXECUTED` too fast | debounce or cycle cap misconfigured | 10-minute debounce, 20 cycles/session |
+
+## Account identifiers
+
+Alpaca names one account two ways, and only one of them appears in the dashboard:
+
+| Field | Example | Where you see it |
+|---|---|---|
+| `account_number` | `PA3B52AVG2TD` | the Alpaca web dashboard |
+| `id` | a UUID | `/v2/account` only |
+
+Both come from the same `/v2/account` response and refer to the same account.
+`ALPACA_ACCOUNT_ID` accepts either.
+
+For the submission form, give **both** — the number so a human can match it to the
+dashboard, the UUID so their tooling can. There is no cost to supplying both and a
+real cost to guessing which one they meant.
+
+```bash
+PYTHONPATH=src .venv/bin/python -c "
+from agent.config import load_env, profile
+from agent.host.rest import Rest
+load_env(); a = Rest(profile('competition')).account()
+print('account_number:', a['account_number']); print('id:', a['id'])"
+```
 
 ## Submission, Friday before 11:00 ET
 

@@ -178,8 +178,10 @@ class Capabilities:
         chain = self._options_tradeable_chain(underlying, exp_gte, exp_lte,
                                               width=width, max_spread_pct=max_spread_pct)
         if not chain:
-            return {"candidates": [], "note": "no tradeable contracts under the "
-                                              "liquidity gate for that range"}
+            return {"spot": round(self._market_spot(underlying), 2),
+                    "generated": 0, "kept": 0, "families": [],
+                    "note": "no tradeable contracts under the liquidity gate for "
+                            "that range", "candidates": []}
         spot = self._market_spot(underlying)
         fams = tuple(families) if families else cand.FAMILIES
         found = cand.enumerate_structures(chain, spot, underlying=underlying,
@@ -314,6 +316,9 @@ class Capabilities:
     # ---- trading (two-phase, gated) ---------------------------------------
     def _trading_execute(self, intent: dict):
         ti = _intent_from_dict(intent)
+        if self.theses.get(ti.thesis_id) is None:
+            raise CapabilityError(
+                f"unknown thesis {ti.thesis_id!r}; call thesis.open before trading.execute")
         kw = dict(equity=self.equity, open_premium_at_risk=self.open_premium_at_risk,
                   realised_loss=self.realised_loss, open_positions=self.open_positions)
         out = self.ex.execute(ti, **kw)
@@ -328,6 +333,12 @@ class Capabilities:
                                      open_premium_at_risk=self.open_premium_at_risk,
                                      realised_loss=self.realised_loss,
                                      open_positions=self.open_positions, store=False)
+        maximum_profit = staged.verified.max_profit
         return {"qty": staged.verified.qty, "limit_price": staged.verified.limit_price,
-                "max_loss": staged.verified.max_loss, "passed": staged.passed,
+                "max_loss": staged.verified.max_loss,
+                "max_profit": None if maximum_profit == st.UNBOUNDED else maximum_profit,
+                "risk_reward": (maximum_profit / staged.verified.max_loss
+                                if staged.verified.max_loss > 0
+                                and maximum_profit != st.UNBOUNDED else None),
+                "passed": staged.passed,
                 "checklist": staged.checklist()}

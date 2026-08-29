@@ -64,15 +64,16 @@ def test_unrelated_imports_are_blocked(sb, module):
 
 
 def test_promised_imports_remain_available(sb):
-    code = ("import math, json, statistics, datetime\n"
+    code = ("import math, json, statistics, datetime, time\n"
             "from datetime import timedelta\n"
             "import numpy as np\n"
             "import pandas as pd\n"
             "print(math.sqrt(4), json.dumps([statistics.mean([1, 3])]), "
-            "timedelta(days=1).days, np.mean([2, 4]), len(pd.Series([1])))")
+            "timedelta(days=1).days, np.mean([2, 4]), len(pd.Series([1])), "
+            "time.monotonic() > 0)")
     r = sb.run(code, {})
     assert r.ok, r.stderr
-    assert r.stdout.strip() == "2.0 [2] 1 3.0 1"
+    assert r.stdout.strip() == "2.0 [2] 1 3.0 1 True"
 
 
 def test_scipy_imports_when_dependency_is_installed(sb):

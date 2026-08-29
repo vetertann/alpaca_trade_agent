@@ -3,7 +3,7 @@
 The model proposes a TradeIntent -- geometry only. The host materialises a
 VerifiedTradeIntent from fresh quotes and account state, which is the only object
 execution accepts. Staging returns the rendered checklist; confirmation requires
-an identical intent and a live nonce.
+an identical intent, a later model program, and a live nonce.
 
 Geometry stays with the model, pricing stays with the host.
 """
@@ -28,9 +28,14 @@ TTL_SECONDS = 45.0
 
 
 class StagedOrder:
-    def __init__(self, verified: VerifiedTradeIntent, results: list[GateResult]):
+    def __init__(self, verified: VerifiedTradeIntent, results: list[GateResult],
+                 staged_program_id: int | None = None):
         self.verified = verified
         self.results = results
+        # Confirmation is a deliberation boundary, not merely a second function
+        # call.  The host records which model program created the draft so two
+        # execute() calls in one generated program can never submit it.
+        self.staged_program_id = staged_program_id
 
     @property
     def passed(self) -> bool:
@@ -70,19 +75,32 @@ class Executor:
         self._staged: dict[str, StagedOrder] = {}
         self._consumed: set[str] = set()
         self.cycle_id: str | None = None
+        self.program_id: int | None = None
 
     def begin_cycle(self, cycle_id: str) -> None:
         """Staging is deliberately scoped to one model decision cycle."""
         self.cycle_id = cycle_id
+        self.program_id = None
         self._staged.clear()
+
+    def begin_program(self, program_id: int) -> None:
+        """Mark the model-program boundary used by two-phase confirmation."""
+        if self.cycle_id is None:
+            raise RuntimeError("cannot begin a program outside a decision cycle")
+        self.program_id = int(program_id)
 
     def end_cycle(self) -> None:
         self._staged.clear()
         self.cycle_id = None
+        self.program_id = None
 
     @property
     def latest_staged(self) -> StagedOrder | None:
         return self._staged[next(reversed(self._staged))] if self._staged else None
+
+    def discard_staged(self) -> None:
+        """Discard drafts created by a failed model program."""
+        self._staged.clear()
 
     # ---- materialisation ---------------------------------------------------
     def materialise(self, intent: TradeIntent, *, equity: float,
@@ -131,7 +149,7 @@ class Executor:
             max_loss=max_loss, max_profit=max_profit,
             quote_snapshot_hash=_quote_hash(quotes),
             materialised_at=now, ttl_seconds=TTL_SECONDS)
-        staged = StagedOrder(verified, results)
+        staged = StagedOrder(verified, results, self.program_id)
         if store:
             self._staged[self._key(intent)] = staged
         return staged
@@ -169,17 +187,34 @@ class Executor:
                 for l in intent.legs]
 
     def execute(self, intent: TradeIntent, **materialise_kwargs) -> dict:
-        """Stage on the first identical call in a cycle and confirm on the second."""
+        """Stage first; confirm only from a later model program in this cycle."""
         canonical = resolve_intent(self.rest, intent)
         key = self._key(canonical)
         if key not in self._staged:
             self._staged.clear()  # one draft per cycle; a changed intent replaces it
             staged = self.materialise(canonical, **materialise_kwargs)
+            maximum_profit = (None if staged.verified.max_profit == st.UNBOUNDED
+                              else staged.verified.max_profit)
             return {"status": "staged", "qty": staged.verified.qty,
                     "limit_price": staged.verified.limit_price,
-                    "max_loss": staged.verified.max_loss, "passed": staged.passed,
+                    "max_loss": staged.verified.max_loss,
+                    "max_profit": maximum_profit,
+                    "passed": staged.passed,
                     "checklist": staged.checklist(),
-                    "next": "call trading.execute again with an identical intent to confirm"}
+                    "next": "inspect the checklist; a later model program may call "
+                            "trading.execute with the identical intent to confirm"}
+        staged = self._staged[key]
+        if (self.program_id is not None
+                and staged.staged_program_id == self.program_id):
+            maximum_profit = (None if staged.verified.max_profit == st.UNBOUNDED
+                              else staged.verified.max_profit)
+            return {"status": "awaiting_confirmation", "qty": staged.verified.qty,
+                    "limit_price": staged.verified.limit_price,
+                    "max_loss": staged.verified.max_loss,
+                    "max_profit": maximum_profit,
+                    "passed": staged.passed,
+                    "checklist": staged.checklist(),
+                    "next": "confirmation is accepted only from the next model program"}
         return self.confirm(canonical, **materialise_kwargs)
 
     # ---- confirmation ------------------------------------------------------

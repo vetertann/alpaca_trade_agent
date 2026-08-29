@@ -102,3 +102,77 @@ def test_record_appends_a_row(tmp_path):
     r.record(quotes(ch), WHEN)
     r.record(quotes(ch), WHEN)
     assert len((tmp_path / "shadow.jsonl").read_text().strip().splitlines()) == 2
+
+
+# --- settlement and re-entry -------------------------------------------------
+
+def chain_exp(spot=770.0, expiry="2026-09-01"):
+    rows = chain(spot)
+    return [{**r, "expiry": expiry,
+             "symbol": r["symbol"].replace("260903", expiry.replace("-", "")[2:])}
+            for r in rows]
+
+
+def test_a_position_is_settled_at_expiry_not_dropped():
+    """Once contracts expire their quotes vanish; an unsettled position would
+    silently disappear from equity as if the premium had evaporated."""
+    r = shadow.ShadowRunner()
+    ch = chain_exp(770.0, "2026-09-01")
+    monday = dt.datetime(2026, 8, 31, 15, 0, tzinfo=dt.timezone.utc)
+    r.step(ch, 770.0, quotes(ch), monday, may_enter=True)
+    book = r.books["bull_call"]
+    assert book.positions and book.positions[0].open
+
+    # the underlying rallies through the spread, then the contracts expire
+    tuesday = dt.datetime(2026, 9, 1, 21, 0, tzinfo=dt.timezone.utc)
+    r.settle(790.0, tuesday)
+    p = book.positions[0]
+    assert not p.open, "expired position must be settled"
+    # a bull call spread finishing above both strikes settles at its full width
+    assert book.realised > 0
+    assert book.equity({}) > 100_000, "settled value must survive missing quotes"
+
+
+def test_settlement_uses_intrinsic_value_not_a_quote():
+    r = shadow.ShadowRunner()
+    ch = chain_exp(770.0, "2026-09-01")
+    r.step(ch, 770.0, quotes(ch), dt.datetime(2026, 8, 31, 15, tzinfo=dt.timezone.utc),
+           may_enter=True)
+    # expiring far below every strike: the spread is worthless, loss is the premium
+    r.settle(700.0, dt.datetime(2026, 9, 1, 21, tzinfo=dt.timezone.utc))
+    book = r.books["bull_call"]
+    assert book.realised < 0
+    assert book.equity({}) == pytest.approx(book.cash)
+
+
+def test_a_book_re_enters_after_its_position_expires():
+    """A baseline is the strategy run across the window, not one Monday trade."""
+    r = shadow.ShadowRunner()
+    mon_chain = chain_exp(770.0, "2026-09-01")
+    r.step(mon_chain, 770.0, quotes(mon_chain),
+           dt.datetime(2026, 8, 31, 15, tzinfo=dt.timezone.utc), may_enter=True)
+    assert len(r.books["bull_call"].positions) == 1
+
+    wed_chain = chain_exp(770.0, "2026-09-03")
+    r.step(wed_chain, 770.0, quotes(wed_chain),
+           dt.datetime(2026, 9, 2, 15, tzinfo=dt.timezone.utc), may_enter=True)
+    assert len(r.books["bull_call"].positions) == 2, "should have opened a second"
+    assert r.books["bull_call"].positions[1].open
+
+
+def test_no_re_entry_while_a_position_is_still_live():
+    r = shadow.ShadowRunner()
+    ch = chain_exp(770.0, "2026-09-04")
+    for hour in (15, 16, 17):
+        r.step(ch, 770.0, quotes(ch),
+               dt.datetime(2026, 9, 1, hour, tzinfo=dt.timezone.utc), may_enter=True)
+    assert len(r.books["bull_call"].positions) == 1
+
+
+def test_flat_cash_never_settles_anything():
+    r = shadow.ShadowRunner()
+    ch = chain_exp()
+    r.step(ch, 770.0, quotes(ch), dt.datetime(2026, 8, 31, 15, tzinfo=dt.timezone.utc),
+           may_enter=True)
+    r.settle(800.0, dt.datetime(2026, 9, 2, 21, tzinfo=dt.timezone.utc))
+    assert r.books["flat_cash"].equity({}) == 100_000.0

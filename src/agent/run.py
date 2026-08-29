@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import datetime as dt
 import os
 
@@ -22,6 +23,17 @@ from agent.host.streams import Handlers, StreamSet
 from agent.host.thesis_store import ThesisStore
 from agent.host.trace import Trace
 from agent.sandbox.runner import Sandbox, hint_for
+
+def _failing_line(code: str, stderr: str) -> str:
+    """Pull the source line the traceback blamed, so the repair can name it."""
+    import re
+    match = re.search(r'File "<program>", line (\d+)', stderr or "")
+    if not match:
+        return ""
+    lines = code.splitlines()
+    index = int(match.group(1)) - 1
+    return lines[index].strip() if 0 <= index < len(lines) else ""
+
 
 MEGACAPS = ["NVDA", "AAPL", "MSFT", "TSLA", "AMZN", "GOOGL", "META"]
 TRADED = ["SPY", "QQQ", "IWM"]
@@ -198,6 +210,8 @@ class Agent:
 
         messages = [{"role": "user", "content": prompt.payload(bundle)}]
         staged_checklist = None
+        last_code_sha = None
+        last_stderr = ""
         outcome = "NO_TRADE"
         reason = "no program produced a decision"
 
@@ -239,6 +253,20 @@ class Agent:
                                 "cached": c.cached_tokens,
                                 "cache_write": c.cache_write_tokens,
                                 "reasoning": c.reasoning_tokens}, c.latency_s)
+            # A staged order may only be confirmed by a later model program.  Mark
+            # the boundary on the host before serving this program's RPC calls.
+            self.executor.begin_program(rnd)
+            code_sha = hashlib.sha256(c.code.encode()).hexdigest()[:16]
+            if code_sha == last_code_sha:
+                # Running it again produces the same traceback and burns the round.
+                self.trace.note("identical_program", round=rnd, code_sha=code_sha)
+                messages += [{"role": "assistant", "content": c.raw},
+                             {"role": "user", "content": prompt.repeat_turn(
+                                 last_stderr, hint_for(last_stderr),
+                                 _failing_line(c.code, last_stderr))}]
+                continue
+            last_code_sha = code_sha
+
             # the program the model decided to run; carries the chat's call id so the
             # collector can join this execution back to the reasoning that caused it
             with telemetry.execute_tool("run_program", call_id,
@@ -248,10 +276,21 @@ class Agent:
                     telemetry.record_error(prog_span, RuntimeError(
                         r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "failed"))
             self.trace.evidence(r.stdout, r.calls, r.ok, r.duration_s, r.stderr)
+            last_stderr = r.stderr
             messages_tool_result = telemetry.tool_response_message(
                 call_id, {"ok": r.ok, "stdout": r.stdout[-2000:], "calls": len(r.calls)})
 
             staged = self._latest_staged()
+            # A submission remains authoritative even if model code crashes after
+            # the execute call.  A merely staged draft from a failed program does
+            # not: discard it so repair code cannot confirm an unreviewed remnant.
+            if not r.ok and staged and staged.verified.nonce in self.executor._consumed:
+                outcome, reason = "EXECUTED", "order submitted before program failure"
+                break
+            if not r.ok and staged:
+                self.executor.discard_staged()
+                staged = None
+                staged_checklist = None
             if staged:
                 staged_checklist = staged.checklist()
                 self.trace.verification(staged_checklist, staged.passed)

@@ -49,7 +49,7 @@ prints the gate checklist without submitting; `--mode execute` submits.
 `--dev-models` routes to cheap Nebius models for build-and-test iteration.
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # 237 passed
+.venv/bin/python -m pytest tests/ -q          # 267 passed
 ```
 
 Deploy to a server (the agent listens on no port; nothing is opened):
@@ -61,7 +61,8 @@ Deploy to a server (the agent listens on no port; nothing is opened):
 ## Design decisions worth naming
 
 **Two-phase execution.** The first `trading.execute(intent)` stages and returns the
-rendered gate checklist; nothing is submitted. An identical second call confirms.
+rendered gate checklist; nothing is submitted. A later model program can confirm
+with one identical call. A second call inside the staging program is host-blocked.
 The host materialises the executable order — exact symbols, quantity, limit price —
 from quotes it fetches at staging time, so a price computed by generated code can
 never ship. The staged intent carries a TTL and a single-use nonce.
@@ -142,11 +143,12 @@ src/agent/
   prompts/           core.md, domain.md, pretrade.md
 scripts/
   panel.py           read-only operator panel over the JSONL trace
+  fill_probe.py      settles multi-leg fill denomination on the dev account
   warmup_check.py    GO/NO-GO protocol for 09:30-09:45 ET
   calibrate.py       live spread and volatility-state measurement
   estimate_cost.py   token and cost projection from measured usage
 deploy/              systemd unit, provisioning, deploy script
-tests/               218 passing tests plus one optional SciPy-dependent test
+tests/               267 passing tests
 ```
 
 Design detail lives in `ARCHITECTURE.md`. Operating procedure lives in `RUNBOOK.md`.

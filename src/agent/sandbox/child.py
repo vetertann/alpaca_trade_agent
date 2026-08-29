@@ -140,7 +140,9 @@ def build_globals(obs: dict) -> dict:
         _scipy = None
         _sps = None
 
-    modules = {"datetime": _datetime, "json": _json, "math": math,
+    import time as _time
+
+    modules = {"datetime": _datetime, "json": _json, "math": math, "time": _time,
                "numpy": np, "pandas": pd, "statistics": statistics}
     if _scipy is not None:
         modules["scipy"] = _scipy
@@ -154,7 +156,7 @@ def build_globals(obs: dict) -> dict:
         safe_builtins.pop(name, None)
 
     g = {"__builtins__": safe_builtins, "math": math, "statistics": statistics,
-         "json": _json, "np": np, "numpy": np, "pd": pd, "pandas": pd,
+         "time": _time, "json": _json, "np": np, "numpy": np, "pd": pd, "pandas": pd,
          "scipy": _scipy, "scipy_stats": _sps, "datetime": _datetime,
          "obs": _wrap(obs), "RpcError": RpcError}
     for ns in NAMESPACES:

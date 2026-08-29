@@ -90,3 +90,37 @@ def test_bundle_history_is_bounded(tmp_path):
 def test_bundle_without_history_is_still_valid(tmp_path):
     b = build(tmp_path)
     assert b["recent_cycles"] == [] and b["blocked_structures"] == []
+    spy = b["universe"]["SPY"]
+    assert spy["realized_vol_source"] == "intraday"
+    assert spy["realized_vol"] == spy["intraday_realized_vol"] == 0.12
+    assert spy["realized_vol_by_window"] == {}
+
+
+def test_daily_windows_remain_available_when_intraday_stream_is_warm(tmp_path,
+                                                                     monkeypatch):
+    class DailyRest(FakeRest):
+        def stock_bars(self, *args, **kwargs):
+            closes = []
+            price = 100.0
+            returns = (0.012, -0.006, 0.004, -0.009, 0.007)
+            for i in range(70):
+                price *= 1 + returns[i % len(returns)]
+                closes.append({"c": price})
+            return closes
+
+    monkeypatch.setattr(preflight, "_atm_iv",
+                        lambda *args, **kwargs: (0.20, "2026-09-03"))
+    b = preflight.build(
+        DailyRest(), FakeSeries(), store(tmp_path),
+        trigger={"name": "anchor"}, universe=["SPY"], expiries=["2026-09-03"],
+        account={"equity": "100000", "cash": "100000",
+                 "options_buying_power": "100000", "options_trading_level": 3},
+    )
+
+    spy = b["universe"]["SPY"]
+    assert set(spy["realized_vol_by_window"]) == {"rv5", "rv10", "rv20", "rv60"}
+    assert spy["realized_vol_source"] == "daily_ewma"
+    assert spy["intraday_realized_vol"] == 0.12
+    assert spy["realized_vol"] != spy["intraday_realized_vol"]
+    assert spy["iv_rv_by_window"]["rv5"] == round(
+        spy["iv_atm"] / spy["realized_vol_by_window"]["rv5"], 3)

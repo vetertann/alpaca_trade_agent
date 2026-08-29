@@ -59,17 +59,25 @@ def build(rest: Rest, series: RollingSeries, theses: ThesisStore, *,
                 spot = float(rest.stock_latest_trade(sym)["p"])
             except Exception:
                 continue
-        rv = series.realized_vol(sym)
-        rv_source = "intraday"
-        if rv is None:
-            try:
-                end = (now - dt.timedelta(minutes=20)).isoformat(timespec="seconds")
-                start = (now - dt.timedelta(days=120)).date().isoformat()
-                bars = rest.stock_bars(sym, "1Day", start, end)
-                rv = volmod.ewma_from_bars(bars) or volmod.realized_from_bars(bars)
-                rv_source = "daily_bars"
-            except Exception:
-                rv, rv_source = None, "unavailable"
+        intraday_rv = series.realized_vol(sym)
+        daily_ewma = None
+        rv_by_window: dict[str, float] = {}
+        # Daily regime estimates must not disappear once the live minute stream is
+        # warm.  The old fallback-only path changed the meaning of `realized_vol`
+        # during the session and emptied the multi-window fields exactly when the
+        # agent was allowed to trade.
+        try:
+            end = (now - dt.timedelta(minutes=20)).isoformat(timespec="seconds")
+            start = (now - dt.timedelta(days=120)).date().isoformat()
+            bars = rest.stock_bars(sym, "1Day", start, end)
+            daily_ewma = volmod.ewma_from_bars(bars)
+            rv_by_window = {f"rv{w}": round(v, 4) for w in (5, 10, 20, 60)
+                            if (v := volmod.realized_from_bars(bars, w)) is not None}
+        except Exception:
+            pass
+        rv = daily_ewma if daily_ewma is not None else intraday_rv
+        rv_source = ("daily_ewma" if daily_ewma is not None else
+                     "intraday" if intraday_rv is not None else "unavailable")
         iv, iv_exp = (_atm_iv(rest, sym, spot, expiries, now)
                       if sym in ("SPY", "QQQ") else (None, None))
         rng = series.session_range(sym)
@@ -77,9 +85,19 @@ def build(rest: Rest, series: RollingSeries, theses: ThesisStore, *,
             "spot": round(spot, 2),
             "session_low": round(rng[0], 2) if rng else None,
             "session_high": round(rng[1], 2) if rng else None,
-            "realized_vol": round(rv, 4) if rv else None,
+            "realized_vol": round(rv, 4) if rv is not None else None,
             "realized_vol_source": rv_source,
-            "iv_atm": round(iv, 4) if iv else None,
+            "intraday_realized_vol": (round(intraday_rv, 4)
+                                        if intraday_rv is not None else None),
+            # One lookback is not a signal. On 2026-08-29 SPY implied read cheap
+            # against 20 and 60 days and rich against 5, so a cycle trusting the
+            # headline ratio alone would have been trading a choice of window.
+            "realized_vol_by_window": rv_by_window,
+            "iv_rv_by_window": {k: round(iv / v, 3) for k, v in rv_by_window.items()
+                                if iv and v} if iv else {},
+            "iv_intraday_rv_ratio": (round(iv / intraday_rv, 3)
+                                      if iv and intraday_rv else None),
+            "iv_atm": round(iv, 4) if iv is not None else None,
             "iv_rv_ratio": round(iv / rv, 3) if (iv and rv) else None,
             "iv_expiry": iv_exp,
         }

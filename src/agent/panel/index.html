@@ -22,7 +22,6 @@
   @media (min-width:1100px) {
     .cols { grid-template-columns:minmax(360px,0.85fr) minmax(0,1.15fr); }
     .right { position:sticky; top:26px; align-self:start; }
-    .log { max-height:calc(100vh - 130px); }
   }
   h1 { font-size:13px; font-weight:500; margin:0 0 22px; letter-spacing:.02em; }
   h1 .meta { color:var(--dim); font-weight:400; }
@@ -44,6 +43,13 @@
   @media (max-width:520px) { .row { grid-template-columns:repeat(2,auto); gap:14px 26px; } }
   svg { display:block; width:100%; height:120px; overflow:visible; margin-top:4px; }
   .log { max-height:520px; overflow-y:auto; }
+  /* After the base rule, or equal specificity lets 520px win on every screen. */
+  @media (min-width:1100px) {
+    /* The decisions column runs to the bottom of the viewport; dead space below
+       the fold is space that could be showing another cycle. */
+    .log { max-height:calc(100vh - 150px); }
+    svg { height:150px; }
+  }
   .cyc { padding:12px 0 14px; border-bottom:1px solid var(--rule); }
   .cyc:last-child { border-bottom:0; }
   .cyc .hd { color:var(--dim); font-size:11px; margin-bottom:7px; }
@@ -53,8 +59,14 @@
            text-transform:uppercase; margin-right:8px; }
   .ev .t { white-space:pre-wrap; word-break:break-word; }
   .thought .t { color:var(--fg); }
-  .evidence .t, .verification .t { color:var(--dim); font-size:12px;
-           max-height:6.6em; overflow:hidden; }
+  .evidence .t, .verification .t { color:var(--dim); font-size:12px; }
+  .program .t, .traceback .t { font-size:12px; }
+  .program .t { color:var(--fg); }
+  .traceback .t { color:var(--down); }
+  .ev .meta { color:var(--dimmer); font-size:10.5px; margin-left:8px; }
+  details pre { margin:6px 0 0; padding:8px 10px; background:var(--hl);
+                border-radius:2px; overflow-x:auto; white-space:pre;
+                font-size:11.5px; line-height:1.5; }
   .order .t, .fill .t { color:var(--fg); }
   .order, .fill { background:var(--hl); margin:0 -10px 6px; padding:6px 10px; }
   .error .t { color:var(--down); white-space:pre-wrap; }
@@ -90,6 +102,11 @@
 <section>
   <div class="label">portfolio</div>
   <table id="pos"><tbody><tr><td class="empty">no open positions</td></tr></tbody></table>
+</section>
+
+<section>
+  <div class="label">baselines</div>
+  <div class="scroll"><table id="shadow"><tbody><tr><td class="empty">no shadow book yet</td></tr></tbody></table></div>
 </section>
 
 <section>
@@ -173,18 +190,23 @@ function typeInto(el, text, key) {
   })();
 }
 
+const COLLAPSIBLE = new Set(["evidence", "verification", "program", "traceback"]);
+
 function event(e, cid, idx) {
   const k = e.kind.toLowerCase();
   const body = esc(e.text);
   const key = `${cid}:${idx}:${k}`;
-  // long machine output is collapsed; the decision text never is
-  if ((k === "evidence" || k === "verification") && body.length > 320) {
-    return `<div class="ev ${k}"><span class="k">${k}</span>` +
-      `<details><summary>${body.split("\n").length} lines</summary>` +
-      `<div class="t">${body}</div></details></div>`;
+  const meta = e.meta ? `<span class="meta">${esc(e.meta)}</span>` : "";
+  // machine output and source collapse; the decision text never does
+  // source is always collapsible; other machine output only once it is long
+  if (COLLAPSIBLE.has(k) && (k === "program" || body.length > 240)) {
+    const lines = body.split("\n").length;
+    const label = k === "program" ? `${lines} lines of Python` : `${lines} lines`;
+    return `<div class="ev ${k}"><span class="k">${k}</span>${meta}` +
+      `<details><summary>${label}</summary><pre class="t">${body}</pre></details></div>`;
   }
   const stream = (k === "thought" || k === "outcome" || k === "order" || k === "fill");
-  return `<div class="ev ${k}"><span class="k">${k}</span>` +
+  return `<div class="ev ${k}"><span class="k">${k}</span>${meta}` +
          `<span class="t"${stream?` data-type="${key}"`:""}>${stream?"":body}</span></div>`;
 }
 
@@ -215,6 +237,24 @@ function log(cycles) {
     const key = n.getAttribute("data-type");
     typeInto(n, texts[key] || "", key);
   });
+}
+
+function shadow(rows) {
+  const t = $("shadow").querySelector("tbody");
+  if (!rows || !rows.length) {
+    t.innerHTML = '<tr><td class="empty">no shadow book yet</td></tr>'; return; }
+  t.innerHTML = '<tr><th>policy</th><th class="n">return</th><th class="n">realised</th>'
+    + '<th class="n">open</th><th class="n">trades</th></tr>'
+    + rows.map(r => {
+        const p = r.return_pct || 0;
+        return `<tr><td>${r.policy}</td>`
+          + `<td class="n ${cls(p)}">${sign(p)}${Math.abs(p).toFixed(2)}%</td>`
+          + `<td class="n dim">${money(r.realised || 0)}</td>`
+          + `<td class="n">${r.open ?? 0}</td>`
+          + `<td class="n dim">${r.total ?? 0}</td></tr>`;
+      }).join("")
+    + '<tr><td colspan="5" class="dim" style="padding-top:6px;white-space:normal">'
+    + 'fixed policies on the same live quotes. no orders are placed.</td></tr>';
 }
 
 function usage(u) {
@@ -255,6 +295,7 @@ async function tick() {
     chart(s.equity_series||[], s.starting||100000);
     positions(s.positions||[]);
     log(s.cycle_log||[]);
+    shadow(s.shadow);
     usage(s.usage);
   } catch (e) {
     $("hdr").textContent = "· disconnected";

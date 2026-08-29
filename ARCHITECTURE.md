@@ -268,7 +268,7 @@ The `oi_gamma` namespace is named for what it measures. Open interest records ho
 
 `risk.max_loss` implements Alpaca's own maintenance-margin method: intrinsic value at every strike present in the structure, payoffs netted at each point, worst point taken, evaluated per expiration with the largest requirement across expirations. Matching Alpaca's method keeps the agent's risk model aligned with actual buying power and prevents rejection at submission.
 
-`trading.execute` is **two-phase**. The first call stages the order and returns the rendered gate checklist without submitting anything. The pre-trade skill is injected into the next observation, and the model must call `trading.execute` again with an identical structure to confirm. Calling it with different arguments stages a new draft instead.
+`trading.execute` is **two-phase**. The first call stages the order and returns the rendered gate checklist without submitting anything. The pre-trade layer is injected into the next observation, and a later model program must call `trading.execute` once with an identical structure to confirm. Calling it twice inside the staging program cannot submit; the host returns `awaiting_confirmation`. Calling it with different arguments stages a new draft instead.
 
 Staging costs one cheap round trip and only when actually trading. What it buys is a second look at precisely the moment that matters, with the gate results visible rather than assumed.
 
@@ -936,6 +936,14 @@ Implemented in `brain/shadow.py`. Fixed policies run inside the agent process, w
 
 Because paper fills price against live quotes, a shadow book marked at the quote closely approximates what the paper account would have recorded. The comparison covers one window and is reported as an observation.
 
+**Each policy is run repeatedly across the window, not bought once on Monday.** A
+book holds at most one position, settles it at intrinsic value against the
+underlying when its contracts expire, and re-enters on the next session. Without
+settlement an expired position would keep its quotes looked up, find none, and drop
+out of equity as though the premium had evaporated — including when it expired deep
+in the money. Without re-entry a "fixed bull call spread" baseline would measure one
+Monday trade rather than the strategy.
+
 ### Shock simulation
 
 Explicitly encouraged by Alpaca as evidence of guardrails. The agent writes the scenario grid itself through a generated program — underlying ±1/2/5%, volatility ±20/50%, one session of decay — and the output goes in the repo and the write-up. Having the agent author its own stress test demonstrates the architecture better than shipping the function pre-built.
@@ -1079,6 +1087,12 @@ The trace is JSONL from the first line of code, rendered to a static HTML report
 TRIGGER → PREFLIGHT → HYPOTHESIS → PROGRAM → EVIDENCE → CANDIDATES → VERIFICATION → ORDER → FILL → RECONCILIATION
 ```
 
+A live read-only panel serves the same trace while the run is in progress: equity
+and P&L, the equity line, open positions, the shadow baselines ranked against the
+agent, model usage with cost, and the decision log grouped by cycle. It is a
+separate process that only reads the JSONL trace, so it cannot place, cancel, or
+influence a trade.
+
 The report shows the firing trigger, the preflight bundle and its hash, the generated program in full, the evidence it produced, competing candidates with normalized economics, the allocation decision, the PASS/FAIL gate, the Alpaca order ID and fill, and equity against the shadow baselines. The `learned/` diff shows which helpers the agent wrote for itself during the run.
 
 Verification renders as a checklist:
@@ -1131,7 +1145,7 @@ helper is a no-op when disabled, so telemetry can never break trading.
 
 ## 15. Build status
 
-Implemented and verified. **169 tests.**
+Implemented and verified. **267 tests.**
 
 | Component | Module | State |
 |---|---|---|
@@ -1202,6 +1216,28 @@ Each is now a regression test.
 - OTel context is thread-local, so capability spans raised on the sandbox's serving
   thread detached from the program span until the context was propagated.
 
+### The window choice was the decision
+
+Measured 2026-08-30 on 18 real SPY candidates for the next session's expiry, holding
+everything constant except the volatility estimate fed to the three measures:
+
+```
+rv60  0.1377  long lookback        5/18 survive all measures  ->  would trade
+ewma  0.1057  the former headline  1/18 survive               ->  would trade
+rv5   0.0560  horizon-matched      0/18 survive               ->  no trade
+```
+
+SPY's last week was calm and its last quarter was not, so implied volatility read
+cheap against a long lookback and rich against a short one. The bundle reported a
+single EWMA figure, and a cycle trusting it would have opened a position sized on a
+sixty-day view of a one-day option.
+
+The bundle now carries `realized_vol_by_window` and `iv_rv_by_window` across 5, 10,
+20 and 60 sessions, the daily EWMA stays the canonical headline so the signal cannot
+jump mid-session when the intraday stream warms, intraday realized volatility is
+reported separately, and the canonical program in the prompt derives its window from
+the days to expiry and passes that sigma explicitly.
+
 ### Verified against live APIs
 
 - All four streams hold simultaneously; equity caps at 30 symbols, options at 200,
@@ -1217,6 +1253,27 @@ Each is now a regression test.
   read from cache.
 - Telemetry delivery confirmed by OTLP/HTTP `200 {"partialSuccess":{}}`.
 - The competition account has **zero orders of any kind, ever**.
+
+### The open assumption
+
+`ledger._signed_fill` treats a multi-leg order's `filled_qty` as a count of
+**spreads**. Every derived figure inherits it: realised P&L, realised losses, the
+deployment throttle, and the equity narrative in the write-up.
+
+If Alpaca instead reports aggregate **leg-contracts**, realised P&L is overstated by
+the sum of the leg ratios. On unit-ratio structures the 12% throttle would fire at
+6% on verticals and 3% on condors — the agent would stop entering far earlier than
+intended and the write-up would report P&L that never happened.
+
+This cannot be settled from documentation or from a cancelled order.
+`scripts/warmup_check.py --order` deliberately submits a non-marketable order, so it
+proves submit and cancel and nothing about fills. `scripts/fill_probe.py` exists
+solely to answer it: one marketable spread on the development account, the parent
+and per-leg quantities and the raw broker response recorded, then flattened from
+actual broker positions. Nonterminal entry and exit orders are cancelled in the
+cleanup path. It runs at 09:32 ET on Monday, before anything else trades.
+
+Until it has run, the assumption is documented rather than guessed at.
 
 ### The risk that remains
 

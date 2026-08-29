@@ -25,12 +25,18 @@ def g_paper_endpoint(trading_url: str) -> GateResult:
 
 def g_account_identity(account: dict, profile_name: str, expected_account_id: str,
                        now: dt.datetime | None = None) -> GateResult:
-    """Require the selected credentials to resolve to the configured account."""
-    actual = str(account.get("id", ""))
-    if not expected_account_id:
+    """Require the selected credentials to resolve to the configured account.
+
+    Alpaca identifies one account two ways: `id` is a UUID the API returns, and
+    `account_number` is the `PA…` string the dashboard shows. Either is accepted,
+    because the value a person can actually see is the one they will configure.
+    """
+    expected = str(expected_account_id or "").strip()
+    if not expected:
         return GateResult("account_identity", False,
                           f"{profile_name} expected account id is not configured")
-    if actual != expected_account_id:
+    known = {str(account.get("id", "")), str(account.get("account_number", ""))} - {""}
+    if expected not in known:
         return GateResult("account_identity", False,
                           f"{profile_name} credentials resolved to an unexpected account")
     if profile_name == "competition" and not in_scored_window(now):

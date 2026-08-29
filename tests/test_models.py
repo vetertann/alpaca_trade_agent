@@ -18,16 +18,19 @@ def test_resolve_prefers_the_head_of_the_chain(monkeypatch):
 
 
 def test_resolve_falls_back_when_a_key_is_missing(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+    """Only OpenAI is reachable, so the chain must walk past Anthropic and Nebius."""
     monkeypatch.setenv("OPENAI_API_KEY", "x")
     assert models.resolve("decision").provider == "openai"
 
 
-def test_resolve_raises_when_nothing_is_available(monkeypatch):
-    for k in ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "OPENAI_API_KEY",
-              "OPEN_AI_API_KEY", "NEBIUS_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
+def test_resolve_walks_the_chain_in_order(monkeypatch):
+    monkeypatch.setenv("NEBIUS_API_KEY", "x")
+    assert models.resolve("decision").model == "moonshotai/Kimi-K3"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    assert models.resolve("decision").model == "claude-opus-5"
+
+
+def test_resolve_raises_when_nothing_is_available():
     with pytest.raises(RuntimeError, match="no provider available"):
         models.resolve("decision")
 

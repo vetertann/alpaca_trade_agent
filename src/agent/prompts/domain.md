@@ -10,19 +10,35 @@ barely reacts to the move you are betting on.
 
 # Reading the volatility state
 
-`obs.universe[symbol]` carries `realized_vol`, `iv_atm`, and `iv_rv_ratio`, all
-computed locally from the streamed series and chain. These are the central inputs.
+`obs.universe[symbol]` carries `realized_vol`, `iv_atm`, and `iv_rv_ratio`, computed
+locally from daily bars and the current chain. These are the central inputs.
+
+**One lookback is not a signal.** `iv_rv_ratio` is computed against an EWMA of daily
+returns, and volatility estimates can disagree across windows.
+`realized_vol_by_window` and `iv_rv_by_window` provide 5, 10, 20 and 60-session
+views. A cheap-or-rich claim that holds at only one lookback is a choice of window,
+not a settled market observation: name the window and match it to the structure's
+horizon. For zero-to-two DTE, emphasize RV5 and RV10; for three-to-five DTE,
+emphasize RV10 and RV20. Agreement between adjacent windows is stronger evidence
+than either estimate alone. RV5 is responsive but is based on only five returns, so
+do not make it authoritative by itself. `intraday_realized_vol` and
+`iv_intraday_rv_ratio` are separate live-session context; they never replace the
+daily fields.
+
+After choosing and naming the horizon, pass its volatility explicitly as `sigma` to
+`vol.measures`. Otherwise that capability chooses its own fallback estimate and the
+distribution being evaluated may not match the one in your reasoning.
 
 Implied volatility here is computed by us with a calendar-time Black-Scholes and no
 dividend yield. It reads roughly 0.8 volatility points below Alpaca's own figure on
 one-week SPY contracts, so **compare our implied against our realized**, never
-against remembered market levels. Percentiles in `obs` are drawn from our own
-history under the same formula and are the right reference.
+against remembered market levels. Do not assume a percentile field that is not in
+the observation bundle.
 
-Alpaca's Greeks arrive in the chain wherever a contract has a valid two-sided quote,
-and are absent exactly where the quote is unusable. Our delta and gamma agree with
-theirs to under half a percent. Treat divergence as a signal that something is wrong
-with the quote.
+Chain rows do not contain Greeks. After loading a contract through `options.chain`
+or `options.contracts`, call `options.greeks(symbol)` when a decision needs them.
+The result is computed locally from the current quote and our implied-volatility
+convention.
 
 # Opportunity families
 

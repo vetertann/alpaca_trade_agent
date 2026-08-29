@@ -53,7 +53,7 @@ HINTS = {
     "KeyError": "A key was missing from a result. Result shapes are exactly as "
                 "documented; do not assume extra fields.",
     "TypeError": "Argument types or arity are wrong. Check the signature.",
-    "ImportError": "Imports are limited to datetime, json, math, statistics, numpy, "
+    "ImportError": "Imports are limited to datetime, json, math, statistics, time, numpy, "
                    "pandas, scipy, and scipy.stats. These modules and the capability "
                    "namespaces are already preloaded; do not import OS, process, "
                    "filesystem, or network modules.",

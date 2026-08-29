@@ -1,10 +1,12 @@
 import datetime as dt
 import pytest
 from agent.config import ET
+from agent.host.capabilities import Capabilities, CapabilityError
 from agent.host.contracts import parse_occ_symbol
 from agent.host.execution import Executor
 from agent.host.ledger import ExecutionLedger
 from agent.host.risk_params import DEFAULT as RP
+from agent.host.thesis_store import ThesisStore
 from agent.types import Leg, TradeIntent
 
 EXP = dt.date(2026, 9, 3)
@@ -56,6 +58,13 @@ def vertical(risk_budget=5000.0):
     return TradeIntent("SPY", "vertical_call",
                        (leg(770, "call", "buy"), leg(775, "call", "sell")),
                        "th_test", risk_budget)
+
+
+def intent_json(intent=None):
+    intent = intent or vertical()
+    return {"underlying": intent.underlying, "family": intent.family,
+            "legs": Executor._legs_json(intent), "thesis_id": intent.thesis_id,
+            "risk_budget": intent.risk_budget}
 
 
 GOOD_QUOTES = {
@@ -176,6 +185,54 @@ def test_staging_is_cycle_scoped_and_full_intent_is_hashed():
     assert again["status"] == "staged" and rest.submitted == []
 
 
+def test_same_model_program_cannot_confirm():
+    ex, rest = make()
+    ex.begin_cycle("cycle-1")
+    ex.begin_program(1)
+    first = ex.execute(vertical(), equity=100_000, now=NOW)
+    second = ex.execute(vertical(), equity=100_000, now=NOW)
+    assert first["status"] == "staged"
+    assert second["status"] == "awaiting_confirmation"
+    assert rest.submitted == []
+
+
+def test_later_model_program_can_confirm_identical_intent():
+    ex, rest = make()
+    ex.begin_cycle("cycle-1")
+    ex.begin_program(1)
+    ex.execute(vertical(), equity=100_000, now=NOW)
+    ex.begin_program(2)
+    out = ex.execute(vertical(), equity=100_000, now=NOW)
+    assert out["status"] == "submitted"
+    assert len(rest.submitted) == 1
+
+
+def test_failed_program_can_discard_its_unsubmitted_draft():
+    ex, rest = make()
+    ex.begin_cycle("cycle-1")
+    ex.begin_program(1)
+    ex.execute(vertical(), equity=100_000, now=NOW)
+    ex.discard_staged()
+    ex.begin_program(2)
+    out = ex.execute(vertical(), equity=100_000, now=NOW)
+    assert out["status"] == "staged"
+    assert rest.submitted == []
+
+
+def test_expired_draft_restaged_in_later_program_needs_another_program():
+    ex, rest = make()
+    ex.begin_cycle("cycle-1")
+    ex.begin_program(1)
+    ex.execute(vertical(), equity=100_000, now=NOW)
+    object.__setattr__(ex.latest_staged.verified, "ttl_seconds", -1.0)
+    ex.begin_program(2)
+    restaged = ex.execute(vertical(), equity=100_000, now=NOW)
+    repeated = ex.execute(vertical(), equity=100_000, now=NOW)
+    assert restaged["status"] == "restaged"
+    assert repeated["status"] == "awaiting_confirmation"
+    assert rest.submitted == []
+
+
 def test_changed_intent_replaces_the_only_cycle_draft():
     ex, _ = make()
     ex.begin_cycle("cycle-1")
@@ -190,6 +247,26 @@ def test_preview_materialisation_does_not_create_confirmation_state():
     ex, _ = make()
     ex.materialise(vertical(), equity=100_000, now=NOW, store=False)
     assert ex.latest_staged is None
+
+
+def test_capability_rejects_missing_thesis_before_staging(tmp_path):
+    ex, rest = make()
+    caps = Capabilities(rest, object(), ThesisStore(tmp_path / "theses.jsonl"),
+                        ex, RP, equity=100_000)
+    with pytest.raises(CapabilityError, match="call thesis.open"):
+        caps.dispatch("trading", "execute", [intent_json()], {})
+    assert ex.latest_staged is None
+
+
+def test_preview_returns_complete_documented_economics(tmp_path):
+    ex, rest = make()
+    caps = Capabilities(rest, object(), ThesisStore(tmp_path / "theses.jsonl"),
+                        ex, RP, equity=100_000)
+    out = caps.dispatch("trading", "preview", [intent_json()], {})
+    assert out["max_loss"] == pytest.approx(4860)
+    assert out["max_profit"] == pytest.approx(4140)
+    assert out["risk_reward"] == pytest.approx(4140 / 4860)
+    assert isinstance(out["passed"], bool)
 
 
 def test_contract_metadata_mismatch_is_refused_before_pricing():

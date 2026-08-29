@@ -20,6 +20,7 @@ from agent.config import ET
 
 PANEL = Path(__file__).resolve().parents[1] / "src" / "agent" / "panel" / "index.html"
 MAX_LOG = 60
+MAX_CODE = 20_000
 
 # $ per million tokens. Only Anthropic reports the cache split, so only Anthropic is
 # priced; everything else contributes tokens without a dollar figure.
@@ -40,6 +41,24 @@ def _records(path: Path) -> list[dict]:
             except json.JSONDecodeError:
                 pass
     return out
+
+
+def _shadow(run_dir: Path) -> list[dict]:
+    """Latest line of the shadow ledger: fixed policies run against the same quotes."""
+    path = run_dir / "shadow.jsonl"
+    if not path.exists():
+        return []
+    last = None
+    for line in path.read_text(errors="replace").splitlines():
+        if line.strip():
+            try:
+                last = json.loads(line)
+            except json.JSONDecodeError:
+                pass
+    if not last:
+        return []
+    rows = [{"policy": k, **v} for k, v in (last.get("books") or {}).items()]
+    return sorted(rows, key=lambda r: -r.get("return_pct", 0))
 
 
 def build_state(run_dir: Path) -> dict:
@@ -102,11 +121,29 @@ def build_state(run_dir: Path) -> dict:
                 row["cost_usd"] += c
             log.append({"cycle": r.get("cycle"), "ts": r["ts"], "kind": "THOUGHT",
                         "model": m, "text": r.get("thought", "")})
+            # The program is the artifact. Recording it to disk and hiding it from
+            # the operator defeats the point of a code agent.
+            code = r.get("code") or ""
+            if code:
+                log.append({"cycle": r.get("cycle"), "ts": r["ts"], "kind": "PROGRAM",
+                            "text": code[:MAX_CODE],
+                            "meta": f"round {r.get('round')} · {m} · "
+                                    f"{r.get('latency_s')}s · sha {r.get('code_sha','')}"})
 
         elif kind == "EVIDENCE":
-            head = (r.get("stdout") or "").strip().splitlines()
+            calls = r.get("calls") or []
+            names: dict[str, int] = {}
+            for c in calls:
+                key = f"{c.get('ns')}.{c.get('fn')}"
+                names[key] = names.get(key, 0) + 1
+            summary = ", ".join(f"{k}×{v}" if v > 1 else k for k, v in names.items())
             log.append({"cycle": r.get("cycle"), "ts": r["ts"], "kind": "EVIDENCE",
-                        "text": "\n".join(head[:14]) or "(no output)"})
+                        "text": (r.get("stdout") or "").strip() or "(no output)",
+                        "meta": f"{len(calls)} capability calls · {r.get('duration_s')}s"
+                                + (f" · {summary}" if summary else "")})
+            if not r.get("ok") and r.get("stderr"):
+                log.append({"cycle": r.get("cycle"), "ts": r["ts"], "kind": "TRACEBACK",
+                            "text": (r.get("stderr") or "").strip()})
 
         elif kind == "VERIFICATION":
             log.append({"cycle": r.get("cycle"), "ts": r["ts"], "kind": "VERIFICATION",
@@ -161,7 +198,7 @@ def build_state(run_dir: Path) -> dict:
             "session": session_state(now), "cycles": len(cycles),
             "equity": equity, "starting": starting,
             "equity_series": equity_series[-400:], "positions": positions,
-            "usage": usage, "cycle_log": cycles_out}
+            "usage": usage, "shadow": _shadow(run_dir), "cycle_log": cycles_out}
 
 
 class Handler(BaseHTTPRequestHandler):

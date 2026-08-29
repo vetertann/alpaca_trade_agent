@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agent.quant import structures as st
+from agent.config import ET
 from agent.types import CONTRACT_MULTIPLIER, Leg
 
 
@@ -34,6 +35,15 @@ class ShadowPosition:
     @property
     def open(self) -> bool:
         return self.closed_at is None
+
+    @property
+    def expiry(self) -> dt.date:
+        return min(leg.expiry for leg in self.legs)
+
+    def expired(self, when: dt.datetime) -> bool:
+        """Contracts stop existing. A held position that is not settled would drop
+        out of equity when its quotes disappear, as if the premium had vanished."""
+        return when.astimezone(ET).date() >= self.expiry
 
     def mark(self, quotes: dict[str, dict]) -> float | None:
         """Mark to market at the price it could be closed at right now."""
@@ -81,6 +91,16 @@ class ShadowBook:
         self.positions.append(p)
         self.cash -= price * qty * CONTRACT_MULTIPLIER
         return p
+
+    def settle_expired(self, pos: ShadowPosition, spot: float,
+                       when: dt.datetime) -> float:
+        """Settle at intrinsic value against the underlying, not against a quote."""
+        per_unit = st.net_payoff_at(pos.legs, spot) / CONTRACT_MULTIPLIER
+        pos.closed_at, pos.exit_price = when, per_unit
+        proceeds = per_unit * pos.qty * CONTRACT_MULTIPLIER
+        self.cash += proceeds
+        self.realised += proceeds - pos.entry_price * pos.qty * CONTRACT_MULTIPLIER
+        return proceeds
 
     def close_position(self, pos: ShadowPosition, quotes: dict, when: dt.datetime) -> bool:
         m = pos.mark(quotes)
@@ -166,7 +186,13 @@ class ShadowRunner:
 
     def step(self, chain: list[dict], spot: float, quotes: dict,
              when: dt.datetime, *, may_enter: bool) -> dict:
-        """One tick. Each policy holds at most one position at a time."""
+        """One tick.
+
+        Each policy holds at most one position at a time and re-enters once the
+        previous one has expired, so a baseline is the strategy run repeatedly
+        across the window rather than a single position bought on Monday.
+        """
+        self.settle(spot, when)
         for name, fn in POLICIES.items():
             book = self.books[name]
             live = [p for p in book.positions if p.open]
@@ -183,6 +209,15 @@ class ShadowRunner:
             if qty >= 1:
                 book.open_position(legs, qty, price, thesis, when)
         return {n: b.summary(quotes) for n, b in self.books.items()}
+
+    def settle(self, spot: float, when: dt.datetime) -> list[str]:
+        """Settle everything that has reached expiry. Frees each book to re-enter."""
+        done = []
+        for name, book in self.books.items():
+            for p in [x for x in book.positions if x.open and x.expired(when)]:
+                book.settle_expired(p, spot, when)
+                done.append(f"{name} settled {p.expiry} at {spot:.2f}")
+        return done
 
     def close_all(self, quotes: dict, when: dt.datetime) -> None:
         for book in self.books.values():

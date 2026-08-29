@@ -166,3 +166,38 @@ def test_calibrated_threshold_admits_measured_atm_spreads():
     """Measured SPY/QQQ at-the-money p90 was 5.95%/3.47% at Friday's close."""
     assert gates.g_spread("SPY", q(4.52, 4.76), RP).passed      # 5.2%
     assert gates.g_spread("QQQ", q(2.16, 2.18), RP).passed      # 0.9%
+
+
+# --- account identity accepts either Alpaca identifier ------------------------
+
+ACCT_UUID = "4655c4ac-0516-42c7-95da-491e3c4e0bde"
+ACCT_NUMBER = "PA3B52AVG2TD"
+IDENT = {"id": ACCT_UUID, "account_number": ACCT_NUMBER, "equity": "100000",
+         "options_trading_level": 3}
+
+
+def test_identity_accepts_the_uuid():
+    assert gates.g_account_identity(IDENT, "competition", ACCT_UUID, now=IN_WINDOW).passed
+
+
+def test_identity_accepts_the_account_number_shown_in_the_dashboard():
+    """The UI never shows the UUID, so the PA number is what people will configure."""
+    assert gates.g_account_identity(IDENT, "competition", ACCT_NUMBER, now=IN_WINDOW).passed
+
+
+def test_identity_tolerates_surrounding_whitespace():
+    assert gates.g_account_identity(IDENT, "competition", f"  {ACCT_NUMBER} ",
+                                    now=IN_WINDOW).passed
+
+
+def test_identity_still_refuses_a_different_account():
+    other = {**IDENT, "id": "130b6905-c3df-48fe-8536-432777020de2",
+             "account_number": "PA3XCANY77UX"}
+    r = gates.g_account_identity(other, "competition", ACCT_UUID, now=IN_WINDOW)
+    assert not r.passed and "unexpected account" in r.reason
+
+
+def test_identity_fails_closed_when_unconfigured():
+    for missing in (None, "", "   "):
+        r = gates.g_account_identity(IDENT, "competition", missing, now=IN_WINDOW)
+        assert not r.passed and "not configured" in r.reason

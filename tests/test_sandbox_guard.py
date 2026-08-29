@@ -15,6 +15,8 @@ def sb(tmp_path):
     ("from scipy.stats import norm\nprint(round(norm.ppf(0.975),3))", "1.96"),
     ("from datetime import timedelta\nprint(timedelta(days=2).days)", "2"),
     ("import math\nprint(math.sqrt(9))", "3.0"),
+    ("import time\nprint(time.monotonic() > 0)", "True"),
+    ("from time import monotonic\nprint(monotonic() > 0)", "True"),
 ])
 def test_analysis_stack_imports(sb, code, expect):
     """A library's own internal imports must not be caught by the allowlist."""
