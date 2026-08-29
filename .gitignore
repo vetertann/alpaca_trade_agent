@@ -1,0 +1,24 @@
+# secrets — the hackathon requires a PUBLIC repo, never commit credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# vendored upstream reference (re-clone with scripts/, not committed)
+vendor/
+docs/us/
+docs/_urls.txt
+
+# agent run artifacts (traces are exported deliberately, not committed raw)
+.run/
+*.pkl
+
+# python / node
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+.ipynb_checkpoints/
+
+.DS_Store

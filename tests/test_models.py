@@ -1,0 +1,42 @@
+import pytest
+from agent.brain import models
+
+
+def test_glm_is_excluded_from_every_chain():
+    """It consumed an 8000-token budget on reasoning and returned no content."""
+    named = {s.model for chain in models.CHAINS.values() for s in chain}
+    assert not any("GLM" in m for m in named)
+
+
+def test_dev_chains_are_cheap_nebius_models():
+    assert all(s.provider == "nebius" for s in models.CHAINS["dev_decision"])
+
+
+def test_resolve_prefers_the_head_of_the_chain(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    assert models.resolve("decision").model == "claude-opus-5"
+
+
+def test_resolve_falls_back_when_a_key_is_missing(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    assert models.resolve("decision").provider == "openai"
+
+
+def test_resolve_raises_when_nothing_is_available(monkeypatch):
+    for k in ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "OPENAI_API_KEY",
+              "OPEN_AI_API_KEY", "NEBIUS_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    with pytest.raises(RuntimeError, match="no provider available"):
+        models.resolve("decision")
+
+
+def test_unknown_role_raises():
+    with pytest.raises(KeyError):
+        models.resolve("nonsense")
+
+
+def test_dev_flag_selects_the_dev_chain(monkeypatch):
+    monkeypatch.setenv("NEBIUS_API_KEY", "x")
+    assert models.resolve("decision", dev=True).model == "moonshotai/Kimi-K3"
