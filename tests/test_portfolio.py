@@ -144,3 +144,57 @@ def test_finite_debit_profit_target_is_half_maximum_profit_not_half_debit():
     )["structures"][0]
     assert row["profit_target"] == pytest.approx(2716)
     assert row["profit_target"] != pytest.approx(1284)
+
+
+def test_explicit_credit_fraction_on_debit_fails_closed_without_basis_fallback():
+    structure = {
+        "structure_id": "sid", "underlying": "SPY", "family": "vertical_call",
+        "qty": 1, "cost_basis": 270, "unrealized_pl": 200,
+        "premium_at_risk": 270,
+        "legs": [
+            {"symbol": "SPY260903C00770000", "ratio_qty": 1, "side": "buy",
+             "position_intent": "buy_to_open", "strike": 770,
+             "option_type": "call", "expiry": "2026-09-03"},
+            {"symbol": "SPY260903C00775000", "ratio_qty": 1, "side": "sell",
+             "position_intent": "sell_to_open", "strike": 775,
+             "option_type": "call", "expiry": "2026-09-03"},
+        ],
+    }
+    thesis = SimpleNamespace(exit_at="", enforced_exit_policy={
+        "schema_version": 2, "candidate_id": "bad", "premium_type": "long",
+        "profit_target": {"kind": "entry_credit_fraction", "value": .5}})
+    row = portfolio.structure_view(
+        structure, thesis, {}, {"SPY": 772},
+        dt.datetime(2026, 9, 1, 14, 0, tzinfo=ET), DEFAULT)
+
+    assert row["profit_target"] == 0
+    assert row["profit_target_policy"]["validation_status"] == "invalid"
+    assert any("net-credit" in error
+               for error in row["profit_target_policy"]["validation_errors"])
+
+
+def test_maximum_profit_fraction_on_unbounded_straddle_fails_closed():
+    structure = {
+        "structure_id": "straddle", "underlying": "SPY", "family": "straddle",
+        "qty": 1, "cost_basis": 1000, "unrealized_pl": 800,
+        "premium_at_risk": 1000,
+        "legs": [
+            {"symbol": "SPY260903C00770000", "ratio_qty": 1, "side": "buy",
+             "position_intent": "buy_to_open", "strike": 770,
+             "option_type": "call", "expiry": "2026-09-03"},
+            {"symbol": "SPY260903P00770000", "ratio_qty": 1, "side": "buy",
+             "position_intent": "buy_to_open", "strike": 770,
+             "option_type": "put", "expiry": "2026-09-03"},
+        ],
+    }
+    thesis = SimpleNamespace(exit_at="", enforced_exit_policy={
+        "schema_version": 2, "candidate_id": "bad", "premium_type": "long",
+        "profit_target": {"kind": "maximum_profit_fraction", "value": .5}})
+    row = portfolio.structure_view(
+        structure, thesis, {}, {"SPY": 770},
+        dt.datetime(2026, 9, 1, 14, 0, tzinfo=ET), DEFAULT)
+
+    assert row["profit_target"] == 0
+    assert row["profit_target_policy"]["validation_status"] == "invalid"
+    assert any("finite-profit" in error
+               for error in row["profit_target_policy"]["validation_errors"])

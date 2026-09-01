@@ -1399,6 +1399,11 @@ class Capabilities:
         if structure is None:
             raise CapabilityError(f"unknown open structure {structure_id!r}")
         target = structure.get("profit_target")
+        target_policy = structure.get("profit_target_policy") or {}
+        if target_policy.get("validation_status") == "invalid":
+            raise CapabilityError(
+                "cannot arm an adaptive exit from an invalid profit-target policy: "
+                + "; ".join(target_policy.get("validation_errors") or []))
         if target is None:
             basis = abs(float(structure.get("cost_basis") or 0))
             target = basis * self.params.profit_target_pct / 100.0

@@ -81,14 +81,17 @@ market.latest_quote(symbols)                         -> {symbol: {mid}}
 market.directional_context(symbol)
     -> {symbol, source, observed_at_et, sample_count, sample_coverage_minutes,
         last_price, return_1m, return_5m, return_15m, return_30m, return_60m,
-        return_since_observed_session_open, normalized_move_*m,
+        return_since_first_stream_observation, normalized_move_*m,
         trend_efficiency_*m, session_low, session_high, session_range_position,
         classification, strength, classification_basis, cross_asset_confirmation}
        Returns observed quote-midpoint direction, not order flow or a forecast.
        `session_range_position` is 0 at the observed low and 1 at the high.
        `normalized_move_*m` is signed net log movement divided by root-sum-square
        minute movement. `trend_efficiency_*m` is absolute net movement divided by
-       total path movement (0 noisy, 1 one-way). Coverage and freshness are explicit.
+       total path movement (0 noisy, 1 one-way). The first-stream-observation return
+       is restart-sensitive and is never the official session-open return; use
+       `session_reference.intraday_move_em` for the broker-anchored session move.
+       Coverage and freshness are explicit.
 market.news(symbols=None, limit=20)                  -> list of articles
 
 options.contracts(underlying, exp_gte, exp_lte)      -> list of contracts

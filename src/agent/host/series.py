@@ -238,10 +238,10 @@ class RollingSeries:
             out[f"trend_efficiency_{minutes}m"] = (
                 round(efficiency, 4) if efficiency is not None else None)
         if len(rows) >= 2 and rows[0][1] > 0:
-            out["return_since_observed_session_open"] = round(
+            out["return_since_first_stream_observation"] = round(
                 latest / rows[0][1] - 1.0, 6)
         else:
-            out["return_since_observed_session_open"] = None
+            out["return_since_first_stream_observation"] = None
 
         with self._lock:
             reference = dict(self._session_reference.get(symbol.upper()) or {})

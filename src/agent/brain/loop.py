@@ -359,7 +359,9 @@ def position_exit_due(position: dict, thesis, now_et: dt.datetime,
     is_long_premium = float(position.get("cost_basis") or 0) > 0
 
     target = float(position.get("profit_target") or 0)
-    if target <= 0 and basis > 0:
+    target_policy_invalid = (
+        (position.get("profit_target_policy") or {}).get("validation_status") == "invalid")
+    if target <= 0 and basis > 0 and not target_policy_invalid:
         target = basis * params.profit_target_pct / 100
     if target > 0 and profit_unreal is not None and profit_unreal >= target:
         return True, (f"executable profit target: +${profit_unreal:,.0f} "

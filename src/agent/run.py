@@ -483,6 +483,18 @@ class Agent:
             policy = row.get("profit_target_policy")
             if thesis_id and policy and self.theses.get(thesis_id) is not None:
                 self.theses.materialize_exit_policy(thesis_id, policy)
+            if policy and policy.get("validation_status") == "invalid":
+                alert_key = (str(row.get("structure_id")), tuple(
+                    policy.get("validation_errors") or []))
+                alerted = getattr(self, "_invalid_exit_policy_alerted", set())
+                if alert_key not in alerted:
+                    alerted.add(alert_key)
+                    self._invalid_exit_policy_alerted = alerted
+                    self.trace.note(
+                        "invalid_profit_target_policy",
+                        structure_id=row.get("structure_id"), thesis_id=thesis_id,
+                        errors=policy.get("validation_errors") or [],
+                        action="profit exit disabled; hard risk and time exits remain active")
         stress = portfolio_stress.stress_portfolio(
             risk_state.get("structures") or [], quotes, spots, now,
             horizon_days=getattr(
@@ -1712,6 +1724,13 @@ class Agent:
                                f"${float(policy['high_water_profit']):,.0f} high-water")
                 if not due:
                     continue
+                settlement = structure.get("settlement_authorization") or {}
+                if (not settlement.get("authorized")
+                        and settlement.get("standing_rule")
+                        and (why.startswith("expiry-day mandatory liquidation")
+                             or why.startswith("final-session time stop"))):
+                    why += ("; settlement revalidation failed: "
+                            + str(settlement.get("reason") or "unknown safeguard"))
                 try:
                     mandatory_expiry = why.startswith("expiry-day mandatory liquidation")
                     if mandatory_expiry:

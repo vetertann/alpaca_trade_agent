@@ -467,3 +467,37 @@ def test_exit_sweep_uses_the_durable_thesis_deadline():
 
     assert len(acted) == 1
     assert "thesis time stop" in acted[0]
+
+
+def test_expiry_exit_ledger_reason_names_failed_settlement_safeguard():
+    structure = {
+        "structure_id": "spread-settle", "thesis_id": "",
+        "cost_basis": 200, "unrealized_pl": 0, "premium_at_risk": 200,
+        "qty": 1, "legs": [{"side": "buy", "expiry": "2026-09-01"}],
+        "settlement_authorization": {
+            "authorized": False,
+            "reason": "nearest short strike is inside the required distance",
+            "standing_rule": {"min_short_distance_points": 3},
+        },
+    }
+    captured = []
+
+    class Executor:
+        def close_structure(self, got, **kwargs):
+            captured.append(kwargs)
+            return {"status": "submitted_close"}
+
+    agent = Agent.__new__(Agent)
+    agent.executor = Executor()
+    agent.theses = SimpleNamespace(get=lambda _thesis_id: None)
+    agent.params = RISK
+    agent.trace = Trace()
+
+    acted = agent._evaluate_snapshot_exits(
+        {"structures": [structure]},
+        dt.datetime(2026, 9, 1, 15, 20, tzinfo=ET), observe_adaptive=False)
+
+    assert acted
+    assert "expiry-day mandatory liquidation" in captured[0]["reason"]
+    assert "nearest short strike" in captured[0]["reason"]
+    assert captured[0]["mandatory_source"] == "expiry_day_liquidation"

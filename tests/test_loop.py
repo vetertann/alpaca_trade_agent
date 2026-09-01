@@ -189,6 +189,14 @@ def test_profit_target_exit():
     assert due and "profit target" in why
 
 
+def test_invalid_explicit_profit_policy_does_not_fall_back_to_entry_basis():
+    pos = {"cost_basis": "1000", "unrealized_pl": "900",
+           "executable_unrealized_pl": "900", "profit_target": 0,
+           "profit_target_policy": {"validation_status": "invalid"}}
+    due, why = loop.position_exit_due(pos, {}, et(1, 12, 0), RP)
+    assert not due and why == ""
+
+
 def test_long_premium_has_no_drawdown_stop():
     """A stop here would sell the convexity the premium was bought to own."""
     pos = {"cost_basis": "1000", "unrealized_pl": "-900"}

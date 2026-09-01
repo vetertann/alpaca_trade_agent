@@ -48,6 +48,8 @@ def test_directional_context_labels_persistent_move_and_explains_fields():
     assert out["session_range_position"] == 1.0
     assert out["source"] == "streamed equity quote midpoints"
     assert out["sample_coverage_minutes"] >= 60
+    assert out["return_since_first_stream_observation"] > 0
+    assert "return_since_observed_session_open" not in out
     assert any("positive normalized" in item
                for item in out["classification_basis"])
 

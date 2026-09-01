@@ -97,17 +97,20 @@ def _profit_target(structure: dict, thesis, params) -> tuple[float, dict]:
     target = dict(policy.get("profit_target") or {})
     kind = str(target.get("kind") or "")
     value = _f(target.get("value"), 0.0)
+    explicit_policy = bool(policy)
+    geometry_error = ""
+    try:
+        legs = [_leg(raw) for raw in structure.get("legs") or []]
+        maximum = st.max_profit(legs, signed_entry_price, qty)
+    except (KeyError, TypeError, ValueError) as exc:
+        legs, maximum = [], st.UNBOUNDED
+        geometry_error = f"cannot validate structure geometry: {exc}"
 
     # Schema-1 policies applied entry-basis semantics to every premium type.  A
     # finite-profit debit structure is upgraded in place to the semantics its
     # thesis described; credit structures retain their natural credit fraction.
     if kind == "entry_basis_profit_pct":
         fraction = _f(target.get("value_pct"), params.profit_target_pct) / 100.0
-        try:
-            legs = [_leg(raw) for raw in structure.get("legs") or []]
-            maximum = st.max_profit(legs, signed_entry_price, qty)
-        except (KeyError, TypeError, ValueError):
-            maximum = st.UNBOUNDED
         if signed_entry_price > 0 and maximum != st.UNBOUNDED:
             target = {"kind": "maximum_profit_fraction", "value": fraction}
         elif signed_entry_price < 0:
@@ -116,6 +119,58 @@ def _profit_target(structure: dict, thesis, params) -> tuple[float, dict]:
             target = {"kind": "entry_basis_profit_fraction", "value": fraction}
         kind, value = target["kind"], float(target["value"])
 
+    # Missing legacy policy is reconstructed from broker-backed economics. An
+    # explicitly present schema-2 policy is never silently reinterpreted.
+    if not kind and not explicit_policy and not geometry_error:
+        fraction = params.profit_target_pct / 100.0
+        if signed_entry_price < 0:
+            target = {"kind": "entry_credit_fraction", "value": fraction}
+        elif maximum != st.UNBOUNDED:
+            target = {"kind": "maximum_profit_fraction", "value": fraction}
+        else:
+            target = {"kind": "entry_basis_profit_fraction", "value": fraction}
+        kind, value = target["kind"], float(target["value"])
+
+    errors: list[str] = []
+    if geometry_error:
+        errors.append(geometry_error)
+    if kind not in {"profit_dollars", "entry_credit_fraction",
+                    "entry_basis_profit_fraction", "maximum_profit_fraction"}:
+        errors.append(f"unknown profit target kind {kind!r}")
+    if not math.isfinite(value) or value <= 0:
+        errors.append("profit target value must be finite and positive")
+    if kind.endswith("_fraction") and value > 1:
+        errors.append("profit target fraction must be in (0, 1]")
+    if kind == "entry_credit_fraction" and signed_entry_price >= 0:
+        errors.append("entry_credit_fraction requires a net-credit structure")
+    if kind == "entry_basis_profit_fraction" and not (
+            signed_entry_price > 0 and maximum == st.UNBOUNDED):
+        errors.append(
+            "entry_basis_profit_fraction requires a net-debit unbounded-profit structure")
+    if kind == "maximum_profit_fraction" and not (
+            signed_entry_price > 0 and maximum != st.UNBOUNDED and maximum > 0):
+        errors.append(
+            "maximum_profit_fraction requires a net-debit finite-profit structure")
+    if kind == "profit_dollars" and maximum != st.UNBOUNDED and value > maximum:
+        errors.append("profit_dollars exceeds the structure's finite maximum profit")
+    declared_premium = str(policy.get("premium_type") or "")
+    actual_premium = "long" if signed_entry_price > 0 else "short"
+    if declared_premium and declared_premium != actual_premium:
+        errors.append(
+            f"policy premium_type {declared_premium!r} conflicts with {actual_premium!r} fill")
+
+    if errors:
+        canonical = {
+            **policy,
+            "schema_version": max(int(policy.get("schema_version") or 0), 2),
+            "profit_target": target,
+            "resolved_profit_target_dollars": 0.0,
+            "resolved_from_filled_entry": True,
+            "validation_status": "invalid",
+            "validation_errors": errors,
+        }
+        return 0.0, canonical
+
     if kind == "profit_dollars":
         dollars = value
     elif kind == "entry_credit_fraction":
@@ -123,22 +178,15 @@ def _profit_target(structure: dict, thesis, params) -> tuple[float, dict]:
     elif kind == "entry_basis_profit_fraction":
         dollars = basis * value
     elif kind == "maximum_profit_fraction":
-        try:
-            legs = [_leg(raw) for raw in structure.get("legs") or []]
-            maximum = st.max_profit(legs, signed_entry_price, qty)
-        except (KeyError, TypeError, ValueError):
-            maximum = st.UNBOUNDED
-        dollars = maximum * value if maximum != st.UNBOUNDED else 0.0
-    else:
-        target = {"kind": "entry_basis_profit_fraction",
-                  "value": params.profit_target_pct / 100.0}
-        dollars = basis * float(target["value"])
+        dollars = maximum * value
     canonical = {
         **policy,
         "schema_version": max(int(policy.get("schema_version") or 0), 2),
         "profit_target": target,
         "resolved_profit_target_dollars": round(max(float(dollars), 0.0), 2),
         "resolved_from_filled_entry": True,
+        "validation_status": "valid",
+        "validation_errors": [],
     }
     return canonical["resolved_profit_target_dollars"], canonical
 
