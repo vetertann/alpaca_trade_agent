@@ -1227,7 +1227,8 @@ class Agent:
                 break
             messages = [{"role": "user", "content": (
                 prompt.payload(bundle) + "\n\n" + prompt.repair_turn(
-                    r.stderr, hint_for(r.stderr), c.code))}]
+                    r.stderr, hint_for(r.stderr), c.code,
+                    rounds_remaining=MAX_ROUNDS - rnd))}]
 
         self.trace.outcome(outcome, reason)
         if outcome != "DEGRADED":

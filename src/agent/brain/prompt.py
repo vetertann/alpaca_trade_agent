@@ -116,11 +116,26 @@ def repeat_turn(traceback: str, hint: str, failing_line: str = "") -> str:
                    "`thought` and `code`.")
 
 
-def repair_turn(traceback: str, hint: str, source: str = "") -> str:
+def _last_round_guidance(rounds_remaining: int | None) -> str:
+    if rounds_remaining != 1:
+        return ""
+    return (
+        "\n\nExactly one program round remains. There is no later program available "
+        "to confirm a new `trading.execute` or `trading.execute_if` draft. If entry "
+        "evidence is complete, finish now with `trading.set_entry_trigger(...)` and "
+        "an explicit price boundary; arming that host-watched trigger is the market "
+        "action for this cycle. Otherwise finish with `decision.no_trade(reason)`. "
+        "Do not merely stage a new order."
+    )
+
+
+def repair_turn(traceback: str, hint: str, source: str = "",
+                rounds_remaining: int | None = None) -> str:
     body = f"Your program failed.\n\n```\n{traceback[-2000:]}\n```"
     if source:
         body += f"\n\nThe program that failed was:\n\n```python\n{source[-8000:]}\n```"
     return body + (f"\n\nHint: {hint}" if hint else "") + \
+        _last_round_guidance(rounds_remaining) + \
         "\n\nFix it and continue from what you already computed. Do not restart.\n\n" + \
         OUTPUT_REMINDER
 
@@ -163,7 +178,9 @@ def missing_evidence_turn(bundle: dict, result: dict, rounds_remaining: int) -> 
             + json.dumps(result, indent=2, default=str)
             + "\n```\n\nCall the missing capabilities for the exact candidate, reconsider "
             "their returned results, and then execute again or decline. "
-            f"{rounds_remaining} program round(s) remain.\n\n" + OUTPUT_REMINDER)
+            f"{rounds_remaining} program round(s) remain."
+            + _last_round_guidance(rounds_remaining)
+            + "\n\n" + OUTPUT_REMINDER)
 
 
 def revision_turn(bundle: dict, result: dict, rounds_remaining: int) -> str:
@@ -174,7 +191,9 @@ def revision_turn(bundle: dict, result: dict, rounds_remaining: int) -> str:
             "```json\n" + json.dumps(result, indent=2, default=str)
             + "\n```\n\nSelect an aligned structure, correct the risk budget or "
             "thesis as named, and execute the corrected intent once—or decline. "
-            f"{rounds_remaining} program round(s) remain.\n\n" + OUTPUT_REMINDER)
+            f"{rounds_remaining} program round(s) remain."
+            + _last_round_guidance(rounds_remaining)
+            + "\n\n" + OUTPUT_REMINDER)
 
 
 def continuation_turn(stdout: str, rounds_remaining: int) -> str:
@@ -190,7 +209,8 @@ def continuation_turn(stdout: str, rounds_remaining: int) -> str:
             "call in the later confirmation program. If neither "
             "terminal action is taken, the next successful program result is "
             "returned again while budget remains.")
-    return out + "\n\n" + OUTPUT_REMINDER
+    return (out + _last_round_guidance(rounds_remaining)
+            + "\n\n" + OUTPUT_REMINDER)
 
 
 def state_turn(manifest: dict | None) -> str:

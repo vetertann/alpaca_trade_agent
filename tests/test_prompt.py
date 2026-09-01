@@ -153,6 +153,15 @@ def test_repair_turn_includes_the_hint():
     assert t.endswith(prompt.OUTPUT_REMINDER)
 
 
+def test_last_repair_round_requires_a_terminal_action_not_a_new_draft():
+    turn = prompt.repair_turn(
+        "ImportError: traceback", "use the allowed modules",
+        rounds_remaining=1)
+    assert "Exactly one program round remains" in turn
+    assert "trading.set_entry_trigger" in turn
+    assert "Do not merely stage" in turn
+
+
 def test_observation_turn_flags_a_staged_order():
     plain = prompt.observation_turn("out")
     staged = prompt.observation_turn("out", "PASS economics")
@@ -171,6 +180,13 @@ def test_continuation_turn_returns_results_and_preserves_confirmation_budget():
     assert "without a terminal submission" in turn
     assert "Repeat the exact same conditional call" in turn
     assert turn.endswith(prompt.OUTPUT_REMINDER)
+
+
+def test_final_continuation_uses_host_trigger_instead_of_unfinishable_staging():
+    turn = prompt.continuation_turn('{"qualified": true}', 1)
+    assert "Exactly one program round remains" in turn
+    assert "trading.set_entry_trigger" in turn
+    assert "Do not merely stage" in turn
 
 
 def test_state_turn_is_authoritative_and_names_dropped_objects():
