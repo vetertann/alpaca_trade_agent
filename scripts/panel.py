@@ -31,18 +31,29 @@ PRICES = {"claude-opus-5": (5.00, 25.00), "claude-opus-4-8": (5.00, 25.00),
 CACHE_WRITE, CACHE_READ = 1.25, 0.10
 
 
-def _records(path: Path) -> list[dict]:
+def _iter_records(path: Path):
+    """Yield valid JSONL records without retaining or bulk-reading the trace.
+
+    PREFLIGHT and PORTFOLIO records are deliberately rich and can be hundreds of
+    kilobytes each.  Expanding the complete trace into a Python list made panel
+    memory grow with runtime and eventually hit the systemd limit.  The panel only
+    needs running aggregates and the latest snapshot, so streaming is sufficient.
+    """
     if not path.exists():
-        return []
-    out = []
-    for line in path.read_text(errors="replace").splitlines():
-        line = line.strip()
-        if line:
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-    return out
+        return
+    with path.open(errors="replace") as source:
+        for line in source:
+            line = line.strip()
+            if line:
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    pass
+
+
+def _records(path: Path) -> list[dict]:
+    """Compatibility helper for small ledgers and tests."""
+    return list(_iter_records(path))
 
 
 def _shadow(run_dir: Path) -> list[dict]:
@@ -104,7 +115,6 @@ def _portfolio_row(position: dict) -> dict:
 
 
 def build_state(run_dir: Path) -> dict:
-    recs = _records(run_dir / "trace.jsonl")
     now = dt.datetime.now(ET)
 
     equity_series, positions, starting = [], [], 100_000.0
@@ -120,10 +130,51 @@ def build_state(run_dir: Path) -> dict:
              "reasoning": 0, "calls": 0, "cost_usd": 0.0, "priced_calls": 0,
              "by_model": {}}
 
-    for r in recs:
+    refusal_events: set[tuple[str, str]] = set()
+    submitted_ids: set[str] = set()
+    fill_ids: set[str] = set()
+    deterministic_exit_ids: set[str] = set()
+    no_trades = 0
+    incomplete_cycles = 0
+    reconciliations = 0
+
+    for r in _iter_records(run_dir / "trace.jsonl"):
         kind = r.get("kind")
         if r.get("cycle"):
             cycles.add(r["cycle"])
+
+        # Proof counters are accumulated in the same streaming pass as the UI
+        # state.  Keeping a second in-memory copy of every record is unnecessary.
+        if kind == "OUTCOME" and str(r.get("outcome") or "").upper() == "NO_TRADE":
+            no_trades += 1
+        elif kind == "OUTCOME" and str(r.get("outcome") or "").upper() == "INCOMPLETE":
+            incomplete_cycles += 1
+        elif kind == "RECONCILE":
+            reconciliations += 1
+        elif kind == "VERIFICATION" and not r.get("passed", True):
+            names = re.findall(r"^FAIL\s+([^:]+):", str(r.get("checklist") or ""), re.M)
+            for name in names or ["verification"]:
+                refusal_events.add((str(r.get("cycle") or r.get("seq")),
+                                    name.strip()))
+        elif kind == "NOTE" and r.get("message") == "action_trigger_blocked":
+            for name in r.get("failed_gates") or ["action_trigger"]:
+                refusal_events.add((str(r.get("trigger_id") or r.get("seq")),
+                                    str(name)))
+        elif kind == "ORDER" and r.get("status") in (
+                "submitted", "submitted_close"):
+            oid = str(r.get("order_id") or r.get("client_order_id") or r.get("seq"))
+            submitted_ids.add(oid)
+            reason = str(r.get("reason") or "").lower()
+            if (r.get("status") == "submitted_close"
+                    and (str(r.get("execution_path") or "").startswith("host_")
+                         or reason.startswith("action trigger ")
+                         or "time stop" in reason
+                         or "profit target" in reason
+                         or reason.startswith("adaptive executable-profit"))):
+                deterministic_exit_ids.add(oid)
+        elif kind == "FILL" and float(r.get("delta_filled_qty") or 0) > 0:
+            fill_ids.add(str(r.get("order_id") or r.get("client_order_id")
+                             or r.get("seq")))
 
         if kind == "NOTE" and r.get("message") == "started":
             model = r.get("model", model)
@@ -277,47 +328,6 @@ def build_state(run_dir: Path) -> dict:
         g["events"].append(e)
 
     cycles_out = [grouped[c] for c in reversed(order)][:12]
-
-    refusal_events: set[tuple[str, str]] = set()
-    submitted_ids: set[str] = set()
-    fill_ids: set[str] = set()
-    deterministic_exit_ids: set[str] = set()
-    no_trades = 0
-    incomplete_cycles = 0
-    reconciliations = 0
-    for record in recs:
-        kind = record.get("kind")
-        if kind == "OUTCOME" and str(record.get("outcome") or "").upper() == "NO_TRADE":
-            no_trades += 1
-        elif kind == "OUTCOME" and str(record.get("outcome") or "").upper() == "INCOMPLETE":
-            incomplete_cycles += 1
-        elif kind == "RECONCILE":
-            reconciliations += 1
-        elif kind == "VERIFICATION" and not record.get("passed", True):
-            names = re.findall(r"^FAIL\s+([^:]+):", str(record.get("checklist") or ""), re.M)
-            for name in names or ["verification"]:
-                refusal_events.add((str(record.get("cycle") or record.get("seq")),
-                                    name.strip()))
-        elif kind == "NOTE" and record.get("message") == "action_trigger_blocked":
-            for name in record.get("failed_gates") or ["action_trigger"]:
-                refusal_events.add((str(record.get("trigger_id") or record.get("seq")),
-                                    str(name)))
-        elif kind == "ORDER" and record.get("status") in (
-                "submitted", "submitted_close"):
-            oid = str(record.get("order_id") or record.get("client_order_id")
-                      or record.get("seq"))
-            submitted_ids.add(oid)
-            reason = str(record.get("reason") or "").lower()
-            if (record.get("status") == "submitted_close"
-                    and (str(record.get("execution_path") or "").startswith("host_")
-                         or reason.startswith("action trigger ")
-                         or "time stop" in reason
-                         or "profit target" in reason
-                         or reason.startswith("adaptive executable-profit"))):
-                deterministic_exit_ids.add(oid)
-        elif kind == "FILL" and float(record.get("delta_filled_qty") or 0) > 0:
-            fill_ids.add(str(record.get("order_id") or record.get("client_order_id")
-                             or record.get("seq")))
 
     refusal_counts = collections.Counter(name for _, name in refusal_events)
     proof = {
