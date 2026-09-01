@@ -110,7 +110,10 @@ def evidence(edges=(0.10, 0.08, 0.05), stable=True):
     return {
         "evaluation": {"candidate": "candidate-1", "edge_by_measure": {
             "lognormal": edges[0], "block_bootstrap": edges[1],
-            "student_t": edges[2]}},
+            "student_t": edges[2]}, "evaluated_net_price": 2.70,
+            "expected_profit_by_measure": {
+                "lognormal": 55.0, "block_bootstrap": 45.0,
+                "student_t": 35.0}},
         "ranking": {"stable_top": ["candidate-1"] if stable else []},
         "direction": {"sigma": 0.15, "days": 2},
     }
@@ -148,6 +151,67 @@ def test_host_evidence_and_resulting_book_scenario_bound_quantity():
     assert staged.sizing["portfolio_scenario"]["resulting_breached"] is False
     assert {row.name for row in staged.results} >= {
         "volatility_evidence", "portfolio_scenario"}
+
+
+def test_fresh_price_repricing_refuses_when_weakest_edge_falls_below_live_friction():
+    rest = FakeRest(GOOD_QUOTES)
+    ex = Executor(rest, RP, "competition", mode="execute",
+                  expected_account_id=EXPECTED_ACCOUNT_ID,
+                  enforce_entry_risk=True)
+    stale = evidence()
+    stale["evaluation"]["evaluated_net_price"] = 2.60
+    staged = ex.materialise(
+        vertical(), equity=100_000, now=NOW,
+        entry_evidence=stale, market_spots={"SPY": 772})
+    gate = next(row for row in staged.results if row.name == "fresh_price_edge")
+    assert gate.passed is False
+    assert staged.sizing["fresh_price_edge"]["weakest_expected_profit"] == 25.0
+    assert staged.sizing["fresh_price_edge"]["required_expected_profit"] == 30.0
+
+
+def test_count_cap_exemption_uses_positive_binding_scenario_effect_not_family_label(
+        monkeypatch):
+    from agent.host import portfolio_risk
+
+    contribution = {"value": 25.0}
+
+    def stress(*args, **kwargs):
+        return {
+            "status": "ok", "missing_symbols": [],
+            "worst_current": {"spot_expected_move_multiple": -1.0,
+                              "iv_relative_shock": 0.0,
+                              "current_book_pnl": -100.0, "spots": {}},
+            "scenarios": [{"spot_expected_move_multiple": -1.0,
+                           "iv_relative_shock": 0.0,
+                           "current_book_pnl": -100.0,
+                           "candidate_unit_pnl": contribution["value"]}],
+        }
+
+    def assess(stress_result, equity, limit_pct, qty):
+        return {"status": "ok", "allowed_qty": qty, "current_breached": False,
+                "resulting_breached": False, "current_worst_pnl": -100,
+                "resulting_worst_pnl": -75, "loss_limit_dollars": 4000}
+
+    monkeypatch.setattr(portfolio_risk, "stress_portfolio", stress)
+    monkeypatch.setattr(portfolio_risk, "assess_admission", assess)
+    open_book = [{"underlying": "SPY", "family": "iron_condor",
+                  "premium_type": "short", "legs": []} for _ in range(8)]
+    rest = FakeRest(GOOD_QUOTES)
+    ex = Executor(rest, RP, "competition", mode="execute",
+                  expected_account_id=EXPECTED_ACCOUNT_ID,
+                  enforce_entry_risk=True)
+
+    helpful = ex.materialise(
+        vertical(), equity=100_000, now=NOW, open_positions=open_book,
+        entry_evidence=evidence(), market_spots={"SPY": 772})
+    assert next(row for row in helpful.results if row.name == "concentration").passed
+    assert helpful.sizing["portfolio_scenario"]["measured_scenario_reducing"] is True
+
+    contribution["value"] = -25.0
+    harmful = ex.materialise(
+        vertical(), equity=100_000, now=NOW, open_positions=open_book,
+        entry_evidence=evidence(), market_spots={"SPY": 772})
+    assert not next(row for row in harmful.results if row.name == "concentration").passed
 
 
 def test_partial_evidence_gets_half_percent_ceiling_and_weak_evidence_refuses():
@@ -459,7 +523,7 @@ def audited_caps(tmp_path, *, trigger="session_anchor"):
     ex.begin_cycle("cycle-1")
     theses = ThesisStore(tmp_path / "theses.jsonl")
     thesis = theses.open(
-        "test", "SPY", exit_profit="Close at 50% of premium paid",
+        "test", "SPY", exit_profit="Close at $115 profit per spread (50% max profit)",
         exit_invalidation="Long premium; no drawdown stop; volatility regime reverses",
         exit_time="2026-09-03 15:45 ET",
         exit_news="Unexpected macro news changes the distribution")

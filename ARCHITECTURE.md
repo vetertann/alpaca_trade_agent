@@ -23,13 +23,15 @@ Thu Sep 03   09:30–16:00 ET   SCORED   ← last actionable moment, 16:00 ET
 Fri Sep 04   09:30 ET equity snapshot · 11:00 ET submission deadline
 ```
 
-Alpaca's guidance carries an internal contradiction: the measurement window is stated as Monday 09:30 through Friday 09:30, and the measured value is stated as **"the portfolio's total equity as of EOD Thursday Sep 3rd."** Friday's snapshot falls at the opening bell, so no Friday trading is possible in either reading.
+The FAQ defines two related timestamps: total account equity is evaluated at EOD Thursday September 3, while the formal measurement window ends Friday September 4 at 09:30 ET. Options cannot trade between them, so score-horizon valuation uses Thursday EOD and scheduling closes the window at Friday 09:30.
 
-**Operative rule: four sessions, ending Thursday September 3 at 16:00 ET.** The measured object is total account equity, not realised cash. The portfolio must be at its target marked posture by Thursday's close; an option need not expire or be sold by then for its value to count.
+**Operative trading rule: four option sessions, ending Thursday September 3 at 16:00 ET.** The measured object is total account equity, not realised cash. The portfolio must be at its target marked posture by Thursday's close; an option need not expire or be sold by then for its value to count.
 
 Alpaca states that exercises and assignments for contracts expiring September 3 are reflected in the Thursday EOD value. That mechanism is not something the strategy depends on: non-trade activities post the following day, assignment can occur after the close, and Alpaca begins its own expiry risk management around 15:30 ET.
 
-**Design rule: expiry processing is not part of the strategy.** September 3 contracts are closed before broker expiry handling. Later-dated contracts may intentionally remain as a known marked position at the cutoff; their score contribution is valued with residual time value, not terminal payoff.
+**Design rule: expiry processing is exceptional, explicit, and continuously guarded.** Same-day contracts ordinarily enter mandatory liquidation at 15:15 ET. A finite-risk structure may remain only under a durable settlement authorization revalidated from live quotes, scenario risk, buying power, spot, and distance to every short strike on each Tier-0 sample. Later-dated contracts may intentionally remain as a known marked position at the cutoff; their score contribution is valued with residual time value, not terminal payoff.
+
+Concentration relief is likewise effect-based: a candidate bypasses a count cap only when its per-unit P&L is positive in the current binding correlated scenario and the resulting book remains within the scenario-loss ceiling. A family label such as “long gamma” grants nothing by itself.
 
 Build time before going live: this weekend.
 
@@ -581,7 +583,7 @@ SPY, QQQ, and IWM options are **American style**, confirmed from the contracts e
 
 ### Window close
 
-The book reaches its target **marked-equity posture** by Thursday September 3, 16:00 ET. Positions expiring that day are flattened before broker expiry handling. Later-dated positions need not cross the spread merely to turn a broker mark into cash; the host values them at Thursday close with Black–Scholes residual time value, current per-leg implied volatility, and observed half-spread friction.
+The book reaches its target **marked-equity posture** by Thursday September 3, 16:00 ET. Positions expiring that day ordinarily flatten from 15:15; only continuously revalidated, explicitly authorized defined-risk structures may remain for settlement. Later-dated positions need not cross the spread merely to turn a broker mark into cash; the host values them at Thursday close with Black–Scholes residual time value, current per-leg implied volatility, and observed half-spread friction.
 
 ---
 
@@ -867,7 +869,9 @@ EXITS
      convexity the premium was bought to own.
   8  short premium exits when close debit reaches 2x entry credit or loss reaches
      50% of defined maximum loss, whichever comes first.
-  9  every position has an exact ET deadline plus a hard 15:45 ET expiry-day stop.
+  9  every position has an exact ET deadline plus ordinary mandatory 15:15 ET
+     expiry liquidation; only continuously revalidated settlement authorization
+     may suppress that fallback.
 
 STATE
  10  thesis recorded, with price, time, and news invalidation conditions.
@@ -1531,7 +1535,7 @@ cancellation, restart and close-path rehearsals.
 
 **Monday to Thursday** — supervise, tune triggers and gates, Featherless triage, shock simulation, daily social posts.
 
-**Thursday 16:00 ET — scored window closes.** Target posture reached, gap exposure minimised.
+**Thursday 16:00 ET — official equity mark.** Target posture reached, gap exposure minimised. The FAQ's formal measurement window ends Friday at 09:30 ET.
 
 **Thursday evening to Friday** — write-up, video, slides, static trace report.
 

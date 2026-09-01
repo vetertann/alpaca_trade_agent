@@ -223,7 +223,8 @@ def g_concentration(underlying: str, open_positions: list, params: RiskParams,
     if risk_reducing:
         return GateResult(
             "concentration", True,
-            "candidate mathematically repairs a breached correlated scenario book")
+            "candidate has a positive measured contribution in the current binding "
+            "scenario and the resulting book remains inside the scenario limit")
     if n_total >= params.max_concurrent_positions:
         return GateResult("concentration", False,
                           f"{n_total} open positions at the {params.max_concurrent_positions} cap")

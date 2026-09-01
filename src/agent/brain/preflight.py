@@ -11,8 +11,9 @@ import copy
 import datetime as dt
 import hashlib
 import json
+import math
 
-from agent.config import ET, WINDOW_CLOSE
+from agent.config import ET, MEASUREMENT_END, WINDOW_CLOSE
 from agent.brain import scheduled_events
 from agent.host.rest import Rest
 from agent.host.series import RollingSeries
@@ -61,6 +62,60 @@ def _atm_iv(rest: Rest, underlying: str, spot: float, expiries: list[str],
         if ivs:
             return sum(ivs) / len(ivs), exp
     return None, None
+
+
+def _bar_session_date(row: dict) -> dt.date | None:
+    try:
+        return dt.datetime.fromisoformat(str(row["t"]).replace("Z", "+00:00")).astimezone(
+            ET).date()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _install_session_reference(rest: Rest, series: RollingSeries, symbol: str,
+                               bars: list[dict], et: dt.datetime,
+                               sigma: float | None) -> None:
+    """Join a completed prior close to the official 09:30 opening bar.
+
+    Alpaca Basic withholds the newest historical bars.  Until the 09:30 minute is
+    actually returned, the series deliberately remains unanchored and direction
+    cannot mistake missing gap data for a zero gap.
+    """
+    if not hasattr(series, "set_session_reference") or not sigma or sigma <= 0:
+        return
+    completed = [row for row in bars
+                 if _bar_session_date(row) is None
+                 or _bar_session_date(row) < et.date()]
+    if not completed:
+        return
+    try:
+        prior_close = float(completed[-1]["c"])
+    except (KeyError, TypeError, ValueError):
+        return
+    cache = getattr(rest, "_session_reference_cache", None)
+    if cache is None:
+        cache = rest._session_reference_cache = {}
+    key = (str(symbol).upper(), et.date().isoformat())
+    opened = cache.get(key)
+    if opened is None and et.time() >= dt.time(9, 45):
+        session_open = et.replace(hour=9, minute=30, second=0, microsecond=0)
+        try:
+            minute = rest.stock_bars(
+                symbol, "1Min", session_open.isoformat(),
+                (session_open + dt.timedelta(minutes=1)).isoformat())
+            row = next((item for item in minute
+                        if _bar_session_date(item) == et.date()), None)
+            if row is not None and float(row.get("o") or 0) > 0:
+                opened = cache[key] = float(row["o"])
+        except Exception:
+            opened = None
+    if opened is None:
+        return
+    expected_move = prior_close * float(sigma) / math.sqrt(252.0)
+    series.set_session_reference(
+        symbol, et.date(), prior_close=prior_close, session_open=float(opened),
+        expected_move=expected_move,
+        source="prior completed daily close + official 09:30 ET one-minute open")
 
 
 def live_trigger_universe(rest: Rest, series: RollingSeries, previous: dict,
@@ -143,8 +198,25 @@ def build(rest: Rest, series: RollingSeries, theses: ThesisStore, *,
     et = now.astimezone(ET)
 
     uni: dict[str, dict] = {}
-    directional = _directional_contexts(
-        series, set(universe) | {"SPY", "QQQ", "IWM"}, now)
+    reference_symbols = set(universe) | {"SPY", "QQQ", "IWM"}
+    daily_bars: dict[str, list[dict]] = {}
+    daily_sigma: dict[str, float | None] = {}
+    for sym in sorted(reference_symbols):
+        try:
+            end = (now - dt.timedelta(minutes=20)).isoformat(timespec="seconds")
+            start = (now - dt.timedelta(days=120)).date().isoformat()
+            rows = rest.stock_bars(sym, "1Day", start, end)
+            completed = [row for row in rows
+                         if _bar_session_date(row) is None
+                         or _bar_session_date(row) < et.date()]
+            daily_bars[sym] = completed
+            daily_sigma[sym] = volmod.ewma_from_bars(completed)
+            _install_session_reference(
+                rest, series, sym, completed, et, daily_sigma[sym])
+        except Exception:
+            daily_bars[sym] = []
+            daily_sigma[sym] = None
+    directional = _directional_contexts(series, reference_symbols, now)
     for sym in universe:
         spot = series.last(sym)
         if spot is None:
@@ -153,17 +225,14 @@ def build(rest: Rest, series: RollingSeries, theses: ThesisStore, *,
             except Exception:
                 continue
         intraday_rv = series.realized_vol(sym)
-        daily_ewma = None
+        daily_ewma = daily_sigma.get(sym)
         rv_by_window: dict[str, float] = {}
         # Daily regime estimates must not disappear once the live minute stream is
         # warm.  The old fallback-only path changed the meaning of `realized_vol`
         # during the session and emptied the multi-window fields exactly when the
         # agent was allowed to trade.
         try:
-            end = (now - dt.timedelta(minutes=20)).isoformat(timespec="seconds")
-            start = (now - dt.timedelta(days=120)).date().isoformat()
-            bars = rest.stock_bars(sym, "1Day", start, end)
-            daily_ewma = volmod.ewma_from_bars(bars)
+            bars = daily_bars.get(sym) or []
             rv_by_window = {f"rv{w}": round(v, 4) for w in (5, 10, 20, 60)
                             if (v := volmod.realized_from_bars(bars, w)) is not None}
         except Exception:
@@ -237,6 +306,9 @@ def build(rest: Rest, series: RollingSeries, theses: ThesisStore, *,
             "hours_to_window_close": round(
                 (WINDOW_CLOSE - et).total_seconds() / 3600, 1),
             "official_equity_mark_at": WINDOW_CLOSE.isoformat(timespec="seconds"),
+            "measurement_window_ends_at": MEASUREMENT_END.isoformat(timespec="seconds"),
+            "hours_to_measurement_end": round(
+                (MEASUREMENT_END - et).total_seconds() / 3600, 1),
             "trading_days_to_equity_mark": round(
                 score_horizon.trading_days_between(et, WINDOW_CLOSE), 6),
             "listed_option_expiry_count": len(expiries),
@@ -300,6 +372,9 @@ def refresh_for_confirmation(rest: Rest, series: RollingSeries, bundle: dict, *,
             et, et.replace(hour=16, minute=0, second=0, microsecond=0)),
         "hours_to_window_close": round((WINDOW_CLOSE - et).total_seconds() / 3600, 1),
         "official_equity_mark_at": WINDOW_CLOSE.isoformat(timespec="seconds"),
+        "measurement_window_ends_at": MEASUREMENT_END.isoformat(timespec="seconds"),
+        "hours_to_measurement_end": round(
+            (MEASUREMENT_END - et).total_seconds() / 3600, 1),
         "trading_days_to_equity_mark": round(
             score_horizon.trading_days_between(et, WINDOW_CLOSE), 6),
         "listed_option_expiry_count": len(expiries),

@@ -185,6 +185,46 @@ def test_action_trigger_price_miss_remains_active_and_labelled(tmp_path):
     assert current["last_observed_value"] == 25
 
 
+def test_spot_invalidation_requires_persistent_samples_then_arms_mandatory_exit(
+        tmp_path):
+    value = agent()
+    value.trace.order = lambda *_args, **_kwargs: None
+    value.action_triggers = ActionTriggerStore(tmp_path / "action_triggers.jsonl")
+    value.series = type("Series", (), {"last": lambda self, symbol: 699.0})()
+    value.rest = object()
+
+    class Executor:
+        def __init__(self):
+            self.calls = []
+
+        def close_structure(self, structure, **kwargs):
+            self.calls.append((structure, kwargs))
+            return {"status": "submitted_close", "order_id": "close-1"}
+
+    value.executor = Executor()
+    value._latest_portfolio_snapshot = {"structures": [{
+        "structure_id": "sid-spot", "underlying": "QQQ", "qty": 1,
+        "legs": [],
+    }]}
+    clock = dt.datetime.now(ET)
+    armed = value.action_triggers.set_exit(
+        "sid-spot", spot_below=700, underlying="QQQ",
+        confirmation_samples=2, sample_interval_seconds=10,
+        valid_for_seconds=300, reason="level invalidates thesis", now=clock)
+
+    assert value._evaluate_action_triggers(clock) == []
+    current = value.action_triggers.current()[armed["trigger_id"]]
+    assert current["status"] == "active" and current["consecutive_hits"] == 1
+    assert value._evaluate_action_triggers(clock + dt.timedelta(seconds=5)) == []
+    assert value.executor.calls == []
+
+    result = value._evaluate_action_triggers(clock + dt.timedelta(seconds=11))
+    assert result[0]["status"] == "submitted_close"
+    assert value.executor.calls[0][1]["must_fill"] is True
+    assert value.executor.calls[0][1]["mandatory_source"] == "spot_invalidation"
+    assert value.action_triggers.current()[armed["trigger_id"]]["status"] == "fired"
+
+
 def test_fired_entry_trigger_binds_broker_order_to_thesis(tmp_path):
     value = agent()
     value.trace.order = lambda *_args, **_kwargs: None

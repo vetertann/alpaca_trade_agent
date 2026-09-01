@@ -153,7 +153,7 @@ def test_mathematically_repairing_candidate_bypasses_count_caps():
         risk_reducing=True)
 
     assert gate.passed
-    assert "repairs a breached" in gate.reason
+    assert "positive measured contribution" in gate.reason
 
 
 def test_render_shows_verdict():

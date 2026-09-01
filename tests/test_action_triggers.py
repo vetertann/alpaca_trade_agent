@@ -90,6 +90,23 @@ def test_store_is_durable_removable_and_expires(tmp_path):
     assert store.current()[exit_row["trigger_id"]]["status"] == "expired"
 
 
+def test_spot_exit_condition_and_confirmation_progress_are_restart_durable(tmp_path):
+    path = tmp_path / "action_triggers.jsonl"
+    store = ActionTriggerStore(path)
+    row = store.set_exit(
+        "sid-spot", spot_below=700, underlying="QQQ",
+        confirmation_samples=3, sample_interval_seconds=10,
+        valid_for_seconds=300, reason="written thesis invalidation", now=NOW)
+
+    assert row["condition"] == {"kind": "spot_below", "value": 700.0}
+    assert row["confirmation_samples"] == 3
+    store.state(row["trigger_id"], "active", consecutive_hits=2,
+                last_sample_at=NOW.isoformat())
+    restored = ActionTriggerStore(path).current()[row["trigger_id"]]
+    assert restored["consecutive_hits"] == 2
+    assert restored["last_sample_at"] == NOW.isoformat()
+
+
 def test_entry_condition_requires_one_positive_boundary():
     with pytest.raises(ValueError, match="exactly one"):
         entry_condition()

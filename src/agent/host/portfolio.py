@@ -87,6 +87,62 @@ def _exit_quote_metrics(legs: list[dict], quotes: dict[str, dict], qty: int) -> 
     return liquidation, missing, quality
 
 
+def _profit_target(structure: dict, thesis, params) -> tuple[float, dict]:
+    """Resolve a typed target from actual reconciled entry economics."""
+    basis = abs(_f(structure.get("cost_basis")))
+    qty = max(abs(int(_f(structure.get("qty"), 0))), 1)
+    signed_entry_price = _f(structure.get("cost_basis")) / (
+        qty * CONTRACT_MULTIPLIER)
+    policy = copy.deepcopy(getattr(thesis, "enforced_exit_policy", {}) or {})
+    target = dict(policy.get("profit_target") or {})
+    kind = str(target.get("kind") or "")
+    value = _f(target.get("value"), 0.0)
+
+    # Schema-1 policies applied entry-basis semantics to every premium type.  A
+    # finite-profit debit structure is upgraded in place to the semantics its
+    # thesis described; credit structures retain their natural credit fraction.
+    if kind == "entry_basis_profit_pct":
+        fraction = _f(target.get("value_pct"), params.profit_target_pct) / 100.0
+        try:
+            legs = [_leg(raw) for raw in structure.get("legs") or []]
+            maximum = st.max_profit(legs, signed_entry_price, qty)
+        except (KeyError, TypeError, ValueError):
+            maximum = st.UNBOUNDED
+        if signed_entry_price > 0 and maximum != st.UNBOUNDED:
+            target = {"kind": "maximum_profit_fraction", "value": fraction}
+        elif signed_entry_price < 0:
+            target = {"kind": "entry_credit_fraction", "value": fraction}
+        else:
+            target = {"kind": "entry_basis_profit_fraction", "value": fraction}
+        kind, value = target["kind"], float(target["value"])
+
+    if kind == "profit_dollars":
+        dollars = value
+    elif kind == "entry_credit_fraction":
+        dollars = basis * value
+    elif kind == "entry_basis_profit_fraction":
+        dollars = basis * value
+    elif kind == "maximum_profit_fraction":
+        try:
+            legs = [_leg(raw) for raw in structure.get("legs") or []]
+            maximum = st.max_profit(legs, signed_entry_price, qty)
+        except (KeyError, TypeError, ValueError):
+            maximum = st.UNBOUNDED
+        dollars = maximum * value if maximum != st.UNBOUNDED else 0.0
+    else:
+        target = {"kind": "entry_basis_profit_fraction",
+                  "value": params.profit_target_pct / 100.0}
+        dollars = basis * float(target["value"])
+    canonical = {
+        **policy,
+        "schema_version": max(int(policy.get("schema_version") or 0), 2),
+        "profit_target": target,
+        "resolved_profit_target_dollars": round(max(float(dollars), 0.0), 2),
+        "resolved_from_filled_entry": True,
+    }
+    return canonical["resolved_profit_target_dollars"], canonical
+
+
 def structure_view(structure: dict, thesis, quotes: dict[str, dict],
                    spots: dict[str, float], now: dt.datetime, params) -> dict:
     row = copy.deepcopy(structure)
@@ -124,6 +180,7 @@ def structure_view(structure: dict, thesis, quotes: dict[str, dict],
     spot = _f(raw_spot, 0.0)
     nearest = min(breakevens, key=lambda price: abs(price - spot)) if breakevens and spot else None
     deadline = _deadline(thesis)
+    profit_target, profit_policy = _profit_target(row, thesis, params)
 
     row.update({
         "entry_price_per_unit": round(signed_entry_price, 4),
@@ -141,7 +198,8 @@ def structure_view(structure: dict, thesis, quotes: dict[str, dict],
         "loss_to_stop": (round(max(loss_stop + unrealized, 0.0), 2)
                           if loss_stop is not None else None),
         "stop_progress": round(stop_progress, 4) if stop_progress is not None else None,
-        "profit_target": round(abs(basis) * params.profit_target_pct / 100, 2),
+        "profit_target": profit_target,
+        "profit_target_policy": profit_policy,
         "breakevens": [round(price, 4) for price in breakevens],
         "spot": round(spot, 4) if spot else None,
         "nearest_breakeven": ({"price": round(nearest, 4),

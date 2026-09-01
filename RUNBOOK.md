@@ -236,6 +236,12 @@ never expose credentials, raw environment values, or mutation endpoints; every
 - Thursday winds down from **15:00 ET**, not 15:45. Expiring structures flatten;
   later-dated contracts may remain when their marked exposure is the deliberate
   final-equity posture. Confirm that every such candidate used `vol.measures_for`.
+- On every expiry day, ordinary liquidation begins at **15:15 ET**. Holding beyond
+  it requires a durable settlement authorization that currently passes usable-quote,
+  finite-risk, scenario, buying-power and short-strike-distance checks. The host
+  performs a named final pre-broker-risk review at 15:28 and keeps revalidating.
+- The FAQ's equity mark is EOD Thursday September 3; the formal measurement window
+  ends Friday September 4 at 09:30 ET. Valuation and eligibility keep them distinct.
 - Post to X/LinkedIn daily tagging `@lablabai` and `@AlpacaHQ` — a scored criterion
   with two separate $500 prizes, and it costs minutes.
 - New entries require same-cycle `market.directional_context` and

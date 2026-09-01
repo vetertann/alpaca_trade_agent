@@ -27,6 +27,7 @@ from agent.host import portfolio, portfolio_risk as portfolio_stress, runtime_st
 from agent.host.rest import Rest
 from agent.host.risk_params import DEFAULT as RISK
 from agent.host.series import RollingSeries
+from agent.host.settlement import SettlementAuthorizationStore
 from agent.host import telemetry
 from agent.host.streams import Handlers, StreamSet
 from agent.host.thesis_store import ThesisStore
@@ -52,6 +53,8 @@ CONFIRMATION_REFRESH_AFTER_S = 15.0
 TRIGGER_IV_REFRESH_SECONDS = 60.0
 TRIGGER_DATA_RETRY_SECONDS = 5.0
 MAX_BLOCKED_TRIGGER_ESCALATIONS_PER_SESSION = 3
+EXPIRY_LIQUIDATION_ET = dt.time(15, 15)
+SETTLEMENT_FINAL_REVIEW_ET = dt.time(15, 28)
 
 # Fire-time admission failures have different lifecycle semantics.  A stale quote
 # or temporarily wide spread is not evidence that the authorization itself is
@@ -75,6 +78,58 @@ def _eligible_expiries(rows: list[dict], today: dt.date) -> list[str]:
     """
     return sorted({str(c["expiration_date"]) for c in rows
                    if today <= dt.date.fromisoformat(str(c["expiration_date"]))})
+
+
+def _settlement_status(structure: dict, authorization: dict | None, *,
+                       now: dt.datetime, scenario: dict,
+                       options_buying_power: float) -> dict:
+    """Revalidate a standing authorization from current broker-backed state."""
+    if not authorization:
+        return {"authorized": False, "reason": "no standing authorization"}
+    legs = list(structure.get("legs") or [])
+    try:
+        expiries = {dt.date.fromisoformat(str(leg["expiry"])) for leg in legs}
+    except (KeyError, TypeError, ValueError):
+        return {"authorized": False, "reason": "invalid leg expiry metadata"}
+    if len(expiries) != 1 or next(iter(expiries)) != now.astimezone(ET).date():
+        return {"authorized": False, "reason": "structure does not expire today"}
+    risk = float(structure.get("premium_at_risk") or 0)
+    if not math.isfinite(risk) or risk <= 0:
+        return {"authorized": False, "reason": "structure is not finite defined-risk"}
+    if structure.get("missing_exit_quotes"):
+        return {"authorized": False, "reason": "executable option quotes are incomplete"}
+    if scenario.get("status") != "ok" or scenario.get("breached") is not False:
+        return {"authorized": False, "reason": "portfolio scenario state is not safe"}
+    if float(options_buying_power or 0) + 1e-9 < risk:
+        return {"authorized": False, "reason": "buying power is below maximum loss"}
+    spot = structure.get("spot")
+    if spot is None:
+        return {"authorized": False, "reason": "underlying spot is unavailable"}
+    distances = []
+    for leg in legs:
+        if str(leg.get("side")) != "sell":
+            continue
+        strike = float(leg["strike"])
+        option_type = str(leg.get("option_type") or "").lower()
+        if option_type == "put":
+            distances.append(float(spot) - strike)
+        elif option_type == "call":
+            distances.append(strike - float(spot))
+    if not distances:
+        return {"authorized": False, "reason": "structure has no short option leg"}
+    nearest = min(distances)
+    required = float(authorization["min_short_distance_points"])
+    valid = nearest >= required
+    return {
+        "authorized": valid,
+        "reason": ("all settlement safeguards currently pass" if valid else
+                   "nearest short strike is inside the required distance"),
+        "nearest_short_distance_points": round(nearest, 4),
+        "required_short_distance_points": required,
+        "continuous_revalidation": True,
+        "ordinary_liquidation_at": EXPIRY_LIQUIDATION_ET.isoformat(timespec="minutes"),
+        "final_review_at": SETTLEMENT_FINAL_REVIEW_ET.isoformat(timespec="minutes"),
+    }
 
 
 class Agent:
@@ -108,6 +163,8 @@ class Agent:
         self.exit_policies = ExitPolicyStore(f"{run_dir}/exit_policies.jsonl")
         self.action_triggers = ActionTriggerStore(
             f"{run_dir}/action_triggers.jsonl")
+        self.settlement_authorizations = SettlementAuthorizationStore(
+            f"{run_dir}/settlement_authorizations.jsonl")
         self.executor = Executor(self.rest, self.params, profile_name, mode=mode,
                                  ledger=self.ledger, enforce_entry_risk=True)
         self.triggers = TriggerState()
@@ -138,6 +195,7 @@ class Agent:
         self._pending_triggers: deque[tuple[str, Trigger]] = deque(maxlen=32)
         self._pending_trigger_keys: set[str] = set()
         self._last_position_quantities: dict[str, float] | None = None
+        self._settlement_final_reviewed: set[tuple[str, str]] = set()
         self.runtime_state_age_seconds: float | None = None
         try:
             self.series.restore(f"{run_dir}/series.json")
@@ -420,6 +478,11 @@ class Agent:
         theses = {thesis.thesis_id: thesis for thesis in self.theses.list("open")}
         snap = portfolio.snapshot(account, risk_state, theses, quotes, spots, now,
                                   self.params)
+        for row in snap.get("structures") or []:
+            thesis_id = str(row.get("thesis_id") or "")
+            policy = row.get("profit_target_policy")
+            if thesis_id and policy and self.theses.get(thesis_id) is not None:
+                self.theses.materialize_exit_policy(thesis_id, policy)
         stress = portfolio_stress.stress_portfolio(
             risk_state.get("structures") or [], quotes, spots, now,
             horizon_days=getattr(
@@ -470,6 +533,37 @@ class Agent:
         trigger_store = getattr(self, "action_triggers", None)
         snap["action_triggers"] = trigger_store.observable(now.astimezone(
             dt.timezone.utc)) if trigger_store is not None else []
+        settlement_store = getattr(self, "settlement_authorizations", None)
+        if settlement_store is not None:
+            scenario = snap.get("portfolio_scenario_risk") or {}
+            buying_power = float(account.get("options_buying_power") or 0)
+            for row in snap.get("structures") or []:
+                authorization = settlement_store.active(str(row.get("structure_id")))
+                row["settlement_authorization"] = _settlement_status(
+                    row, authorization, now=now, scenario=scenario,
+                    options_buying_power=buying_power)
+                if authorization:
+                    row["settlement_authorization"]["standing_rule"] = {
+                        "min_short_distance_points": authorization.get(
+                            "min_short_distance_points"),
+                        "reason": authorization.get("reason"),
+                    }
+                    if now.astimezone(ET).time() >= SETTLEMENT_FINAL_REVIEW_ET:
+                        review_key = (now.astimezone(ET).date().isoformat(),
+                                      str(row.get("structure_id")))
+                        reviewed = getattr(self, "_settlement_final_reviewed", set())
+                        if review_key not in reviewed:
+                            reviewed.add(review_key)
+                            self._settlement_final_reviewed = reviewed
+                            self.trace.note(
+                                "settlement_final_review",
+                                structure_id=row.get("structure_id"),
+                                passed=bool(row["settlement_authorization"].get(
+                                    "authorized")),
+                                result=row["settlement_authorization"])
+            snap["settlement_authorizations"] = settlement_store.observable()
+        else:
+            snap["settlement_authorizations"] = []
         snap["starting_equity"] = getattr(self, "starting_equity", None)
         if record:
             if not hasattr(self, "portfolio_history"):
@@ -724,13 +818,57 @@ class Agent:
                             trigger, "waiting_data", now,
                             reason="reconciled structure is not in the latest snapshot")
                         continue
-                    threshold = float(trigger["condition"]["value"])
-                    out = self.executor.close_structure(
-                        structure,
-                        reason=f"action trigger {trigger_id}: {trigger.get('reason')}",
-                        now=now, min_executable_profit=threshold,
-                        client_order_seed=trigger_id)
-                    observed = out.get("executable_profit")
+                    condition = trigger["condition"]
+                    kind = str(condition.get("kind"))
+                    threshold = float(condition["value"])
+                    if kind == "min_executable_profit":
+                        out = self.executor.close_structure(
+                            structure,
+                            reason=(f"action trigger {trigger_id}: "
+                                    f"{trigger.get('reason')}"),
+                            now=now, min_executable_profit=threshold,
+                            client_order_seed=trigger_id)
+                        observed = out.get("executable_profit")
+                    elif kind in ("spot_above", "spot_below"):
+                        last_sample_at = trigger.get("last_sample_at")
+                        if last_sample_at:
+                            sampled = dt.datetime.fromisoformat(str(last_sample_at))
+                            if (utc_now - sampled.astimezone(
+                                    dt.timezone.utc)).total_seconds() < float(
+                                        trigger.get("sample_interval_seconds") or 10):
+                                continue
+                        symbol = str(trigger.get("underlying") or
+                                     structure.get("underlying") or "").upper()
+                        observed = self.series.last(symbol)
+                        if observed is None:
+                            observed = float(self.rest.stock_latest_trade(symbol)["p"])
+                        hit = (float(observed) >= threshold if kind == "spot_above"
+                               else float(observed) <= threshold)
+                        hits = int(trigger.get("consecutive_hits") or 0) + 1 if hit else 0
+                        required = int(trigger.get("confirmation_samples") or 2)
+                        if hits < required:
+                            store.state(
+                                trigger_id, "active", consecutive_hits=hits,
+                                last_sample_at=utc_now.isoformat(),
+                                last_observed_value=round(float(observed), 6),
+                                last_observed_at=utc_now.isoformat(),
+                                last_evaluation_status="confirming" if hit else "waiting_price",
+                                last_evaluation_reason=(
+                                    f"spot condition confirmed {hits}/{required} samples"
+                                    if hit else "spot condition is not met"),
+                                last_evaluated_at=utc_now.isoformat())
+                            continue
+                        out = self.executor.close_structure(
+                            structure,
+                            reason=(f"confirmed spot invalidation {kind} {threshold:g}: "
+                                    f"{trigger.get('reason')}"),
+                            now=now, client_order_seed=trigger_id,
+                            must_fill=True, mandatory_source="spot_invalidation")
+                        out["observed_spot"] = round(float(observed), 6)
+                        out["confirmed_samples"] = hits
+                    else:
+                        out = {"status": "failed",
+                               "reason": f"unknown exit condition {kind!r}"}
                 elif purpose == "entry":
                     intent = intent_from_dict(trigger["intent"])
                     spot = self.series.last(intent.underlying)
@@ -965,6 +1103,8 @@ class Agent:
                                  trigger=trigger.as_dict(),
                                  exit_policies=getattr(self, "exit_policies", None),
                                  action_triggers=getattr(self, "action_triggers", None),
+                                 settlement_authorizations=getattr(
+                                     self, "settlement_authorizations", None),
                                  scheduled_events=bundle.get("scheduled_events"),
                                  current_scenario_breached=bool(
                                      (portfolio_view.get("portfolio_scenario_risk") or {})
@@ -1282,6 +1422,8 @@ class Agent:
             return "SUBMITTED", "closing order already pending; fill reconciliation pending"
         if trading_status == "trigger_armed":
             return "EXECUTED", "host-watched action trigger armed"
+        if trading_status == "settlement_authorized":
+            return "EXECUTED", "standing expiry-settlement authorization recorded"
         if trading_status == "unknown":
             return "DEGRADED", "submission response ambiguous; durable reconciliation pending"
         if trading_status in ("rejected", "mismatch"):
@@ -1552,7 +1694,10 @@ class Agent:
                 thesis = self.theses.get(str(structure.get("thesis_id") or ""))
                 due, why = position_exit_due(
                     structure, thesis, now, self.params,
-                    require_executable_profit=True)
+                    require_executable_profit=True,
+                    settlement_authorized=bool(
+                        (structure.get("settlement_authorization") or {}).get(
+                            "authorized")))
                 if observe_adaptive and getattr(self, "exit_policies", None) is not None:
                     policy = self.exit_policies.observe(
                         sid, structure.get("executable_unrealized_pl"),
@@ -1568,7 +1713,14 @@ class Agent:
                 if not due:
                     continue
                 try:
-                    result = self.executor.close_structure(structure, reason=why, now=now)
+                    mandatory_expiry = why.startswith("expiry-day mandatory liquidation")
+                    if mandatory_expiry:
+                        result = self.executor.close_structure(
+                            structure, reason=why, now=now, must_fill=True,
+                            mandatory_source="expiry_day_liquidation")
+                    else:
+                        result = self.executor.close_structure(
+                            structure, reason=why, now=now)
                     if result.get("status") != "already_pending":
                         self.trace.note("exit_due", structure_id=sid, reason=why,
                                         source=("adaptive" if why.startswith("adaptive")

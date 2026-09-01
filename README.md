@@ -165,8 +165,10 @@ The model can delegate a durable executable-profit trailing policy for an exact
 structure to Tier 0; its high-water mark survives restart, policies may only tighten,
 and a confirmed giveback submits the close immediately without another model turn.
 Price-dependent immediate actions also carry a host-rechecked executable boundary,
-and short-lived durable entry/exit triggers can act between reasoning turns. Their
-exact condition and remaining life return in the next observation. Mandatory risk
+and short-lived durable entry/exit triggers can act between reasoning turns. Spot
+invalidations require persistent samples and survive restarts; same-day settlement
+requires a separate durable authorization revalidated continuously. The exact
+condition and remaining life return in the next observation. Mandatory risk
 and time exits remain host-owned and cannot be cancelled by the trigger interface.
 
 **Latest-only multi-turn state.** A cycle may run three model/program rounds. Safe

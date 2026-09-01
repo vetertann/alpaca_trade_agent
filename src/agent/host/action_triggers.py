@@ -205,18 +205,41 @@ class ActionTriggerStore:
                 expires_at=(now + dt.timedelta(seconds=ttl)).isoformat())
             return self._view(self.current()[trigger_id], now)
 
-    def set_exit(self, structure_id: str, *, min_executable_profit: float,
+    def set_exit(self, structure_id: str, *, min_executable_profit: float | None = None,
+                 spot_above: float | None = None, spot_below: float | None = None,
+                 underlying: str = "", confirmation_samples: int = 2,
+                 sample_interval_seconds: float = 10.0,
                  valid_for_seconds: float, reason: str,
                  now: dt.datetime | None = None) -> dict:
         now = now or dt.datetime.now(dt.timezone.utc)
         sid = str(structure_id or "").strip()
-        threshold = float(min_executable_profit)
         ttl = float(valid_for_seconds)
         reason = str(reason or "").strip()
         if not sid or not reason:
             raise ValueError("structure_id and exit trigger reason are required")
-        if not math.isfinite(threshold):
-            raise ValueError("min_executable_profit must be finite")
+        supplied = [min_executable_profit is not None,
+                    spot_above is not None, spot_below is not None]
+        if sum(supplied) != 1:
+            raise ValueError(
+                "supply exactly one of min_executable_profit, spot_above or spot_below")
+        if min_executable_profit is not None:
+            threshold = float(min_executable_profit)
+            condition = {"kind": "min_executable_profit", "value": round(threshold, 2)}
+            samples, interval = 1, 1.0
+        else:
+            threshold = float(spot_above if spot_above is not None else spot_below)
+            condition = {"kind": "spot_above" if spot_above is not None else "spot_below",
+                         "value": round(threshold, 6)}
+            samples = int(confirmation_samples)
+            interval = float(sample_interval_seconds)
+            if not str(underlying or "").strip():
+                raise ValueError("underlying is required for a spot-conditioned exit")
+            if not 1 <= samples <= 6:
+                raise ValueError("confirmation_samples must be between 1 and 6")
+            if not 1 <= interval <= 60:
+                raise ValueError("sample_interval_seconds must be between 1 and 60")
+        if not math.isfinite(threshold) or (min_executable_profit is None and threshold <= 0):
+            raise ValueError("exit trigger threshold must be finite and spot must be positive")
         if not 5 <= ttl <= 6 * 60 * 60:
             raise ValueError("exit trigger valid_for_seconds must be between 5s and 6h")
         with self._lock:
@@ -229,8 +252,9 @@ class ActionTriggerStore:
             trigger_id = "t" + uuid.uuid4().hex[:23]
             self._append(
                 "ACTION_TRIGGER", trigger_id=trigger_id, purpose="exit",
-                structure_id=sid, condition={"kind": "min_executable_profit",
-                                             "value": round(threshold, 2)},
+                structure_id=sid, underlying=str(underlying or "").upper(),
+                condition=condition, confirmation_samples=samples,
+                sample_interval_seconds=interval, consecutive_hits=0,
                 reason=reason,
                 expires_at=(now + dt.timedelta(seconds=ttl)).isoformat())
             return self._view(self.current()[trigger_id], now)
@@ -267,6 +291,8 @@ class ActionTriggerStore:
         keep = {key: row.get(key) for key in (
             "trigger_id", "purpose", "structure_id", "action_hash", "condition",
             "reason", "expires_at", "status", "reference_spot", "max_spot_drift_pct",
+            "underlying", "confirmation_samples", "sample_interval_seconds",
+            "consecutive_hits", "last_sample_at",
             "last_observed_value", "last_observed_at", "last_evaluation_status",
             "last_evaluation_reason", "last_gate_failures", "last_evaluated_at",
             "result", "escalation_queued", "escalation_suppressed_reason", "ts")

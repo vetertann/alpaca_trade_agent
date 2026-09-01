@@ -272,6 +272,9 @@ Classify every market action explicitly:
   refused it. The host permits at most three urgent blocked-trigger reviews per
   session, and every review still counts toward the normal session cycle cap.
   Do not re-arm the same refused idea unless the book or authorization changes.
+- **Arm a persisted invalidation.** When a concrete underlying level would make a
+  held thesis false, use a spot-conditioned exit trigger with consecutive samples.
+  This is faster than another reasoning turn while filtering a single noisy print.
 - **Exit regardless.** When a written invalidation, hard risk limit, assignment,
   or time deadline requires reduction, use unconditional `trading.close`. In that
   case the cost of waiting dominates the attempt to preserve a stale price.
@@ -286,9 +289,10 @@ must justify the original boundary and any later replacement.
 The market is open 09:30–16:00 ET. Roughly a third of a session's volume trades in
 the final hour and spreads are widest in the first ten minutes.
 
-The scored window ends Thursday 3 September at 16:00 ET and total account equity,
-not realised cash, is measured. A later-dated position's Thursday mark therefore
-counts even when the option remains open.
+The FAQ takes total account equity at EOD Thursday 3 September and ends the formal
+measurement window Friday 4 September at 09:30 ET. Options are not tradable between
+those timestamps. A later-dated position's Thursday mark therefore counts even when
+the option remains open.
 
 Expiry processing is not part of the strategy. Expiring structures are closed by
 the final-session watcher. A later-dated structure may intentionally remain open at

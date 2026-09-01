@@ -169,6 +169,28 @@ class ThesisStore:
             self._append(t)
             return t
 
+    def materialize_exit_policy(self, thesis_id: str,
+                                policy: dict[str, object]) -> Thesis:
+        """Persist fill-resolved dollars and permit only schema upgrades."""
+        with self._lock:
+            t = self._by_id[thesis_id]
+            canonical = dict(policy)
+            old = dict(t.enforced_exit_policy or {})
+            if old == canonical:
+                return t
+            old_version = int(old.get("schema_version") or 0)
+            new_version = int(canonical.get("schema_version") or 0)
+            if old and new_version < old_version:
+                raise ValueError("exit policy schema cannot move backwards")
+            if old and old.get("candidate_id") != canonical.get("candidate_id"):
+                raise ValueError("fill-resolved policy changed candidate identity")
+            t.enforced_exit_policy = canonical
+            t.notes.append(
+                f"{dt.datetime.now(dt.timezone.utc).isoformat()} host materialized "
+                f"profit target ${float(canonical.get('resolved_profit_target_dollars') or 0):,.2f}")
+            self._append(t)
+            return t
+
     def has_open_exposure(self, underlying: str) -> bool:
         return any(t.status == "open" and underlying.lower() in t.thesis_id
                    for t in self._by_id.values())

@@ -35,9 +35,10 @@ an expired draft and another model program must review it.
 ## Exits
 
 8. If this is long premium, is there **no** drawdown stop? A stop there liquidates
-   the convexity the premium was bought to own. Its profit target must be stated
-   against premium paid, structure value, or concrete P&L when maximum profit is
-   unbounded; “50% of maximum profit” is undefined in that case.
+   the convexity the premium was bought to own. For finite-profit debit structures,
+   the host target is a fraction of maximum profit; for unbounded-profit structures
+   it is a fraction of premium paid or concrete dollar P&L. State the intended
+   target in dollars so the fill-resolved host policy is auditable.
 9. If this is short premium, is there a 2x-close-debit/50%-max-loss stop?
 10. Is `exit_time` an exact `YYYY-MM-DD HH:MM ET` deadline no later than 15:45 ET
     on the earliest option expiry?

@@ -13,6 +13,7 @@ from agent.config import ET, WINDOW_CLOSE, in_scored_window
 
 WARM_UP_MINUTES = 15          # spreads are widest into the opening auction
 WIND_DOWN_ET = dt.time(15, 45)
+EXPIRY_LIQUIDATION_ET = dt.time(15, 15)
 FINAL_SESSION_WIND_DOWN_ET = dt.time(15, 0)
 DEBOUNCE_SECONDS = 300
 FLAT_REVIEW_SECONDS = 1200
@@ -332,11 +333,12 @@ def _expiry_deadline(position: dict) -> dt.datetime | None:
         return None
     # Never let a structure drift into exercise/assignment merely because a
     # generated thesis omitted or misspelled its prose deadline.
-    return dt.datetime.combine(min(expiries), WIND_DOWN_ET, tzinfo=ET)
+    return dt.datetime.combine(min(expiries), EXPIRY_LIQUIDATION_ET, tzinfo=ET)
 
 
 def position_exit_due(position: dict, thesis, now_et: dt.datetime,
-                      params, *, require_executable_profit: bool = False) -> tuple[bool, str]:
+                      params, *, require_executable_profit: bool = False,
+                      settlement_authorized: bool = False) -> tuple[bool, str]:
     """Tier 0 exit evaluation. Deterministic, no model.
 
     Long premium carries no drawdown stop: maximum loss is the premium and is
@@ -356,10 +358,12 @@ def position_exit_due(position: dict, thesis, now_et: dt.datetime,
     basis = abs(float(position.get("cost_basis") or 0))
     is_long_premium = float(position.get("cost_basis") or 0) > 0
 
-    if (basis > 0 and profit_unreal is not None
-            and profit_unreal >= basis * params.profit_target_pct / 100):
+    target = float(position.get("profit_target") or 0)
+    if target <= 0 and basis > 0:
+        target = basis * params.profit_target_pct / 100
+    if target > 0 and profit_unreal is not None and profit_unreal >= target:
         return True, (f"executable profit target: +${profit_unreal:,.0f} "
-                      f"on ${basis:,.0f} basis")
+                      f"against ${target:,.0f} enforced target")
 
     if not is_long_premium:
         credit = basis or 1.0
@@ -388,8 +392,9 @@ def position_exit_due(position: dict, thesis, now_et: dt.datetime,
         return True, f"thesis time stop: {explicit:%Y-%m-%d %H:%M ET}"
 
     expiry = _expiry_deadline(position)
-    if expiry is not None and now_et >= expiry:
-        return True, f"expiry time stop: {expiry:%Y-%m-%d %H:%M ET}"
+    if expiry is not None and now_et >= expiry and not settlement_authorized:
+        return True, (f"expiry-day mandatory liquidation: "
+                      f"{expiry:%Y-%m-%d %H:%M ET}; no currently valid settlement authorization")
 
     if session_state(now_et) == "WINDING_DOWN" and now_et.date() == WINDOW_CLOSE.date():
         # Total equity is scored, not realised cash.  A later-dated option keeps
@@ -397,6 +402,7 @@ def position_exit_due(position: dict, thesis, now_et: dt.datetime,
         # exit spread merely to turn that mark into cash is not automatically
         # beneficial.  Expiring/unknown structures still flatten defensively;
         # later contracts remain subject to their thesis, profit and risk stops.
-        if expiry is None or expiry.date() <= WINDOW_CLOSE.date():
+        if expiry is None or (expiry.date() <= WINDOW_CLOSE.date()
+                              and not settlement_authorized):
             return True, "final-session time stop: expiring book winding down"
     return False, ""

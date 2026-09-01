@@ -19,6 +19,8 @@ from pathlib import Path
 from agent.config import ET
 
 MINUTES_PER_YEAR = 252 * 390
+GAP_DOMINANT_EM = 0.50
+GAP_CONTINUATION_EM = 0.25
 
 
 class RollingSeries:
@@ -29,6 +31,7 @@ class RollingSeries:
         self.min: dict[str, deque] = {}
         self._max_s, self._max_m = max_seconds, max_minutes
         self._cur_min: dict[str, tuple[int, float]] = {}
+        self._session_reference: dict[str, dict] = {}
         # Stream callbacks write on the asyncio thread while decision preflight
         # reads in `asyncio.to_thread`. Deque operations are individually atomic,
         # but iteration is not: an append during iteration raises RuntimeError.
@@ -81,6 +84,20 @@ class RollingSeries:
         if len(rets) < 10:
             return None
         return stats.pstdev(rets) * math.sqrt(MINUTES_PER_YEAR)
+
+    def set_session_reference(self, symbol: str, session_date: dt.date, *,
+                              prior_close: float, session_open: float,
+                              expected_move: float, source: str) -> None:
+        """Install restart-proof session anchors obtained from broker bars."""
+        values = (float(prior_close), float(session_open), float(expected_move))
+        if any(not math.isfinite(value) or value <= 0 for value in values):
+            return
+        with self._lock:
+            self._session_reference[str(symbol).upper()] = {
+                "session_date": session_date.isoformat(),
+                "prior_close": values[0], "session_open": values[1],
+                "expected_move": values[2], "source": str(source),
+            }
 
     def _session_minutes(self, symbol: str,
                          now: dt.datetime | None = None) -> list[tuple[dt.datetime, float]]:
@@ -225,6 +242,47 @@ class RollingSeries:
                 latest / rows[0][1] - 1.0, 6)
         else:
             out["return_since_observed_session_open"] = None
+
+        with self._lock:
+            reference = dict(self._session_reference.get(symbol.upper()) or {})
+        if reference.get("session_date") == latest_at.astimezone(ET).date().isoformat():
+            prior = float(reference["prior_close"])
+            opened = float(reference["session_open"])
+            expected = float(reference["expected_move"])
+            gap_em = (opened - prior) / expected
+            intraday_em = (latest - opened) / expected
+            out["session_reference"] = {
+                **reference,
+                "available": True,
+                "gap_move_em": round(gap_em, 4),
+                "intraday_move_em": round(intraday_em, 4),
+                "interpretation": (
+                    "independent signed moves; positive is up, negative is down; "
+                    "values are fractions of one expected daily move"),
+            }
+            gap_sign = 1.0 if gap_em > 0 else -1.0
+            continuation = gap_sign * intraday_em
+            if (abs(gap_em) >= GAP_DOMINANT_EM
+                    and continuation < GAP_CONTINUATION_EM
+                    and out["classification"] == (
+                        "bullish" if gap_em > 0 else "bearish")):
+                out["classification"] = "neutral"
+                out["strength"] = "weak"
+                out["classification_basis"].append(
+                    f"gap dominated ({gap_em:+.2f} EM) without "
+                    f"{GAP_CONTINUATION_EM:.2f} EM same-direction intraday "
+                    f"continuation ({intraday_em:+.2f} EM); directional alignment "
+                    "is not promoted")
+        else:
+            out["session_reference"] = {
+                "available": False,
+                "status": "unavailable",
+                "gap_move_em": None,
+                "intraday_move_em": None,
+                "interpretation": (
+                    "prior close and official 09:30 ET opening bar are required; "
+                    "missing data is never treated as a zero gap"),
+            }
         return out
 
     def directional_contexts(self, symbols: list[str] | tuple[str, ...] | set[str],
@@ -258,13 +316,14 @@ class RollingSeries:
         """A restart mid-session recovers its recent window rather than starting blind."""
         with self._lock:
             payload = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "minute": {sym: [(t.isoformat(), p) for t, p in dq]
                            for sym, dq in self.min.items()},
                 "second": {sym: [(t.isoformat(), p) for t, p in dq]
                            for sym, dq in self.sec.items()},
                 "current_minute": {sym: [bucket, price]
                                    for sym, (bucket, price) in self._cur_min.items()},
+                "session_reference": self._session_reference,
             }
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -285,17 +344,23 @@ class RollingSeries:
         if not p.exists():
             return False
         raw = json.loads(p.read_text())
-        if raw.get("schema_version") == 2:
+        if raw.get("schema_version") in (2, 3):
             minute_rows = raw.get("minute") or {}
             second_rows = raw.get("second") or {}
             current_minute = {
                 sym: (int(value[0]), float(value[1]))
                 for sym, value in (raw.get("current_minute") or {}).items()}
+            session_reference = (raw.get("session_reference") or {}
+                                 if raw.get("schema_version") == 3 else {})
         else:  # original minute-only checkpoint
             minute_rows, second_rows = raw, {}
             current_minute = {}
+            session_reference = {}
         with self._lock:
             self._cur_min = current_minute
+            self._session_reference = {
+                str(symbol).upper(): dict(value)
+                for symbol, value in session_reference.items()}
             for sym, rows in minute_rows.items():
                 dq = self.min.setdefault(sym, deque(maxlen=self._max_m))
                 for iso, price in rows:

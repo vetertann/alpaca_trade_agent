@@ -24,5 +24,7 @@ def test_scored_window_boundaries():
     assert not config.in_scored_window(dt.datetime(2026, 8, 31, 9, 29, tzinfo=ET))
     assert config.in_scored_window(dt.datetime(2026, 8, 31, 9, 30, tzinfo=ET))
     assert config.in_scored_window(dt.datetime(2026, 9, 3, 16, 0, tzinfo=ET))
+    assert config.in_scored_window(dt.datetime(2026, 9, 4, 9, 29, tzinfo=ET))
+    assert not config.in_scored_window(dt.datetime(2026, 9, 4, 9, 30, tzinfo=ET))
     # Friday is outside: the snapshot is at the opening bell.
     assert not config.in_scored_window(dt.datetime(2026, 9, 4, 9, 31, tzinfo=ET))

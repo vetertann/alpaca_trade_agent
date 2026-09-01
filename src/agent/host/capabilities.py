@@ -20,6 +20,7 @@ from agent.host.exit_policy import ExitPolicyStore
 from agent.host.rest import Rest
 from agent.host.risk_params import RiskParams
 from agent.host.series import RollingSeries
+from agent.host.settlement import SettlementAuthorizationStore
 from agent.host.thesis_store import ThesisStore
 from agent.quant import bs, candidates as cand, measures as ms, score_horizon, vol
 from agent.quant import structures as st
@@ -119,6 +120,7 @@ class Capabilities:
                  trigger: dict | None = None,
                  exit_policies: ExitPolicyStore | None = None,
                  action_triggers: ActionTriggerStore | None = None,
+                 settlement_authorizations: SettlementAuthorizationStore | None = None,
                  scheduled_events: dict | None = None,
                  current_scenario_breached: bool = False):
         self.rest, self.series, self.theses = rest, series, theses
@@ -130,6 +132,7 @@ class Capabilities:
         self.trigger = dict(trigger or {})
         self.exit_policies = exit_policies
         self.action_triggers = action_triggers
+        self.settlement_authorizations = settlement_authorizations
         self.scheduled_events = copy.deepcopy(scheduled_events or {})
         self.current_scenario_breached = bool(current_scenario_breached)
         self._contracts: dict[str, dict] = {}
@@ -472,6 +475,7 @@ class Capabilities:
             value_at_horizon, measures, traded, max_loss=c.max_loss,
             days=float(context.get("days") or 1.0))
         out["candidate"] = candidate_id
+        out["evaluated_net_price"] = round(float(c.net_price), 6)
         out["max_loss"] = round(c.max_loss, 2)
         out["risk_reward"] = round(c.risk_reward, 3)
         horizon = score_horizon.candidate_horizon(
@@ -954,6 +958,12 @@ class Capabilities:
             issues.append(
                 "unbounded-profit structure cannot target a percentage of maximum profit; "
                 "use premium paid, structure value, or a concrete P&L target")
+        if (candidate.net_price > 0 and candidate.max_profit != st.UNBOUNDED
+                and "$" not in str(thesis.exit_profit or "")):
+            issues.append(
+                "finite-profit debit thesis must state its intended profit exit in "
+                "dollars (per spread is acceptable); the host resolves total dollars "
+                "from the actual fill quantity")
         return issues
 
     def _required_exit_policy(self, intent: TradeIntent,
@@ -961,14 +971,23 @@ class Capabilities:
         """Canonical host policy for the exact candidate, independent of prose."""
         candidate = self._candidates[candidate_id]
         thesis = self.theses.get(intent.thesis_id)
+        if candidate.net_price < 0:
+            profit_target = {
+                "kind": "entry_credit_fraction", "value": 0.5}
+        elif candidate.max_profit != st.UNBOUNDED:
+            profit_target = {
+                "kind": "maximum_profit_fraction", "value": 0.5}
+        else:
+            # An unbounded maximum cannot be multiplied.  This remains a typed
+            # entry-basis return target rather than pretending "50% of maximum"
+            # has a finite meaning.
+            profit_target = {
+                "kind": "entry_basis_profit_fraction", "value": 0.5}
         policy: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "candidate_id": candidate_id,
             "premium_type": "long" if candidate.net_price > 0 else "short",
-            "profit_target": {
-                "kind": "entry_basis_profit_pct",
-                "value_pct": float(self.params.profit_target_pct),
-            },
+            "profit_target": profit_target,
             "time_stop": str(getattr(thesis, "exit_at", "") or ""),
         }
         if candidate.net_price > 0:
@@ -1282,9 +1301,11 @@ class Capabilities:
         return out
 
     def _trading_set_exit_trigger(self, structure_id: str,
-                                  min_executable_profit,
-                                  valid_for_seconds=3600, reason=""):
-        """Authorize a removable one-shot close at a whole-structure profit floor."""
+                                  min_executable_profit=None, spot_above=None,
+                                  spot_below=None, valid_for_seconds=3600,
+                                  confirmation_samples=2,
+                                  sample_interval_seconds=10, reason=""):
+        """Authorize a removable one-shot close on profit or confirmed spot."""
         if self.action_triggers is None:
             raise CapabilityError("action trigger store is unavailable")
         structure = next((row for row in self.open_positions
@@ -1294,7 +1315,13 @@ class Capabilities:
         try:
             row = self.action_triggers.set_exit(
                 str(structure_id),
-                min_executable_profit=float(min_executable_profit),
+                min_executable_profit=(float(min_executable_profit)
+                                       if min_executable_profit is not None else None),
+                spot_above=(float(spot_above) if spot_above is not None else None),
+                spot_below=(float(spot_below) if spot_below is not None else None),
+                underlying=str(structure.get("underlying") or ""),
+                confirmation_samples=int(confirmation_samples),
+                sample_interval_seconds=float(sample_interval_seconds),
                 valid_for_seconds=float(valid_for_seconds), reason=str(reason))
         except ValueError as exc:
             raise CapabilityError(str(exc)) from exc
@@ -1320,6 +1347,46 @@ class Capabilities:
         if self.action_triggers is None:
             return []
         return self.action_triggers.active()
+
+    def _trading_authorize_settlement(self, structure_id: str,
+                                      min_short_distance_points,
+                                      reason: str):
+        """Permit a defined-risk expiry position to remain after 15:15 conditionally."""
+        if self.settlement_authorizations is None:
+            raise CapabilityError("settlement authorization store is unavailable")
+        if self._submitted_this_program:
+            raise CapabilityError("a market action was already authorized in this program")
+        structure = next((row for row in self.open_positions
+                          if str(row.get("structure_id")) == str(structure_id)), None)
+        if structure is None:
+            raise CapabilityError(f"unknown open structure {structure_id!r}")
+        try:
+            row = self.settlement_authorizations.authorize(
+                str(structure_id),
+                min_short_distance_points=float(min_short_distance_points),
+                reason=str(reason))
+        except ValueError as exc:
+            raise CapabilityError(str(exc)) from exc
+        out = {**row, "status": "settlement_authorized"}
+        self._trading_result = dict(out)
+        self._submitted_this_program = True
+        return out
+
+    def _trading_remove_settlement_authorization(self, structure_id: str,
+                                                  reason: str):
+        if self.settlement_authorizations is None:
+            raise CapabilityError("settlement authorization store is unavailable")
+        try:
+            row = self.settlement_authorizations.remove(
+                str(structure_id), reason=str(reason))
+        except ValueError as exc:
+            raise CapabilityError(str(exc)) from exc
+        return {"status": "settlement_authorization_removed", **row}
+
+    def _trading_list_settlement_authorizations(self):
+        if self.settlement_authorizations is None:
+            return []
+        return self.settlement_authorizations.observable()
 
     def _trading_set_exit_policy(self, structure_id: str, activation_profit,
                                  max_profit_giveback, minimum_locked_profit=0,

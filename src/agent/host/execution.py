@@ -107,6 +107,73 @@ def _leg_price(quote: dict, side: str) -> float:
     return float(quote["ap"] if side == "buy" else quote["bp"])
 
 
+def _fresh_price_edge_gate(intent: TradeIntent, quotes: dict[str, dict],
+                           fresh_net: float, entry_evidence: dict | None,
+                           multiplier: float = 1.5) -> tuple[GateResult, dict]:
+    """Reprice the weakest expected profit and compare it with live friction.
+
+    Model evaluation owns the payoff distribution; the host owns the executable
+    entry price.  Expected profit changes dollar-for-dollar with the latter, so a
+    later quote never inherits a stale positive edge merely because the geometry
+    stayed the same.
+    """
+    evaluation = (entry_evidence or {}).get("evaluation") or {}
+    expected = evaluation.get("expected_profit_by_measure") or {}
+    evaluated_net = evaluation.get("evaluated_net_price")
+    try:
+        old_net = float(evaluated_net)
+        values = {str(name): float(value) for name, value in expected.items()}
+    except (TypeError, ValueError):
+        values = {}
+        old_net = 0.0
+    if not values or evaluated_net is None:
+        detail = {"status": "incomplete", "reason": (
+            "evaluation lacks expected_profit_by_measure or evaluated_net_price")}
+        return GateResult("fresh_price_edge", False, detail["reason"]), detail
+    half_spread = 0.0
+    missing = []
+    for leg in intent.legs:
+        quote = quotes.get(leg.symbol) or {}
+        try:
+            bid, ask = float(quote["bp"]), float(quote["ap"])
+        except (KeyError, TypeError, ValueError):
+            missing.append(leg.symbol)
+            continue
+        if bid <= 0 or ask <= 0 or ask < bid:
+            missing.append(leg.symbol)
+            continue
+        half_spread += abs(int(leg.ratio_qty)) * (ask - bid) / 2.0
+    if missing:
+        detail = {"status": "incomplete", "missing_symbols": missing}
+        return GateResult(
+            "fresh_price_edge", False,
+            f"live half-spread is unavailable for {', '.join(missing)}"), detail
+    adjustment = (old_net - float(fresh_net)) * CONTRACT_MULTIPLIER
+    repriced = {name: value + adjustment for name, value in values.items()}
+    weakest_name, weakest = min(repriced.items(), key=lambda item: item[1])
+    round_trip = 2.0 * half_spread * CONTRACT_MULTIPLIER
+    floor = float(multiplier) * round_trip
+    passed = weakest + 1e-9 >= floor
+    detail = {
+        "status": "ok" if passed else "refused",
+        "evaluated_net_price": round(old_net, 4),
+        "fresh_executable_net_price": round(float(fresh_net), 4),
+        "price_adjustment_per_spread": round(adjustment, 2),
+        "expected_profit_by_measure_repriced": {
+            key: round(value, 4) for key, value in repriced.items()},
+        "weakest_measure": weakest_name,
+        "weakest_expected_profit": round(weakest, 4),
+        "round_trip_half_spread_cost": round(round_trip, 4),
+        "required_multiple": float(multiplier),
+        "required_expected_profit": round(floor, 4),
+    }
+    reason = (f"{weakest_name} fresh expected profit ${weakest:.2f} must clear "
+              f"{multiplier:.1f}x live round-trip half-spread cost "
+              f"${round_trip:.2f} = ${floor:.2f}; evaluation net "
+              f"{old_net:.2f}, fresh executable net {fresh_net:.2f}")
+    return GateResult("fresh_price_edge", passed, reason), detail
+
+
 def _economic_condition_gate(net: float, condition: dict | None, *,
                              priceable: bool, now: dt.datetime,
                              deadline: dt.datetime | None) -> GateResult | None:
@@ -300,11 +367,18 @@ class Executor:
         evidence["next_scheduled_event"] = (
             {key: next_event.get(key) for key in ("name", "at_et", "minutes_until")}
             if next_event else None)
+        edge_gate = None
+        if priceable and self.enforce_entry_risk:
+            edge_gate, fresh_edge = _fresh_price_edge_gate(
+                intent, quotes, net, entry_evidence)
+            evidence["fresh_price_edge"] = fresh_edge
         evidence_budget = evidence["ceiling_dollars"] if self.enforce_entry_risk else None
         qty, sizing = self._size(
             intent, net, equity, open_premium_at_risk=open_premium_at_risk,
             realised_loss=realised_loss, account=account,
             evidence_budget=evidence_budget, quantity_ceiling=quantity_ceiling)
+        if self.enforce_entry_risk:
+            sizing["fresh_price_edge"] = evidence.get("fresh_price_edge")
 
         scenario = None
         if priceable and self.enforce_entry_risk:
@@ -321,6 +395,17 @@ class Executor:
                 iv_shocks=(0.0, self.params.scenario_iv_shock_pct / 100.0))
             scenario = portfolio_risk.assess_admission(
                 stress, equity, self.params.max_correlated_scenario_loss_pct, qty)
+            binding = (stress or {}).get("worst_current") or {}
+            binding_row = next((row for row in (stress or {}).get("scenarios") or []
+                                if (row.get("spot_expected_move_multiple") ==
+                                    binding.get("spot_expected_move_multiple")
+                                    and row.get("iv_relative_shock") ==
+                                    binding.get("iv_relative_shock"))), None)
+            binding_contribution = float(
+                (binding_row or {}).get("candidate_unit_pnl") or 0)
+            scenario["candidate_unit_pnl_in_current_binding_scenario"] = round(
+                binding_contribution, 2)
+            scenario["measured_scenario_reducing"] = binding_contribution > 1e-9
             scenario_qty = int(scenario.get("allowed_qty") or 0)
             sizing["headroom_qty"]["portfolio_scenario"] = scenario_qty
             sizing["portfolio_scenario"] = scenario
@@ -330,10 +415,11 @@ class Executor:
                 sizing["binding_constraint"] = "portfolio_scenario"
         risk_reducing = bool(
             scenario and scenario.get("status") == "ok"
-            and scenario.get("current_breached")
             and not scenario.get("resulting_breached")
-            and float(scenario.get("resulting_worst_pnl") or 0)
-            > float(scenario.get("current_worst_pnl") or 0))
+            and (scenario.get("measured_scenario_reducing")
+                 or (scenario.get("current_breached")
+                     and float(scenario.get("resulting_worst_pnl") or 0)
+                     > float(scenario.get("current_worst_pnl") or 0))))
         max_loss = st.max_loss(intent.legs, net, qty) if priceable else float("inf")
         max_profit = st.max_profit(intent.legs, net, qty) if priceable else 0.0
 
@@ -347,6 +433,9 @@ class Executor:
                     f"{evidence['stable_top']}; ceiling "
                     f"${evidence['ceiling_dollars']:,.0f}; scheduled-event "
                     f"multiplier {evidence['scheduled_event_multiplier']:.2f}"))
+                results.append(edge_gate or GateResult(
+                    "fresh_price_edge", False,
+                    "fresh executable edge could not be computed"))
                 scenario_ok = bool(scenario and scenario.get("status") == "ok"
                                    and scenario.get("allowed_qty", 0) >= 1
                                    and not scenario.get("resulting_breached"))

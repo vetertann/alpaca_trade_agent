@@ -77,6 +77,31 @@ def test_directional_contexts_names_cross_asset_confirmation():
     assert "3 observed underlyings" in confirmation["interpretation"]
 
 
+def test_restart_proof_gap_reference_downgrades_gap_without_continuation():
+    rs = RollingSeries()
+    for i in range(70):
+        rs.observe("SPY", 102 + i * .01, T0 + dt.timedelta(minutes=i))
+    rs.set_session_reference(
+        "SPY", dt.date(2026, 9, 1), prior_close=100, session_open=102,
+        expected_move=4, source="completed daily bar plus official 09:30 bar open")
+
+    out = rs.directional_context("SPY")
+
+    assert out["session_reference"]["available"] is True
+    assert out["session_reference"]["gap_move_em"] == .5
+    assert out["session_reference"]["intraday_move_em"] < .25
+    assert out["classification"] == "neutral"
+    assert any("gap dominated" in reason for reason in out["classification_basis"])
+
+
+def test_missing_opening_bar_is_explicitly_unavailable_not_zero():
+    rs = RollingSeries()
+    feed(rs, [100 + i * .05 for i in range(70)])
+    reference = rs.directional_context("SPY")["session_reference"]
+    assert reference["available"] is False
+    assert reference["gap_move_em"] is None
+
+
 def test_ignores_nonpositive_prices():
     rs = RollingSeries()
     feed(rs, [0, -1, 100])

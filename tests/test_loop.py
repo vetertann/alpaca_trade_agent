@@ -222,10 +222,30 @@ def test_expiry_day_has_a_hard_stop_even_without_a_parseable_thesis():
         {"expiry": "2026-09-01"}, {"expiry": "2026-09-01"},
     ]}
     assert not loop.position_exit_due(pos, {"exit_time": "later"},
-                                      et(1, 15, 44), RP)[0]
+                                      et(1, 15, 14), RP)[0]
     due, why = loop.position_exit_due(pos, {"exit_time": "later"},
-                                      et(1, 15, 45), RP)
-    assert due and "expiry time stop" in why
+                                      et(1, 15, 15), RP)
+    assert due and "expiry-day mandatory liquidation" in why
+
+
+def test_currently_valid_settlement_authorization_suppresses_only_expiry_fallback():
+    pos = {"cost_basis": "1000", "unrealized_pl": "0", "legs": [
+        {"expiry": "2026-09-01"}, {"expiry": "2026-09-01"},
+    ]}
+    assert not loop.position_exit_due(
+        pos, {}, et(1, 15, 20), RP, settlement_authorized=True)[0]
+    due, why = loop.position_exit_due(
+        pos, {"exit_at": "2026-09-01 15:18 ET"}, et(1, 15, 20), RP,
+        settlement_authorized=True)
+    assert due and "thesis time stop" in why
+
+
+def test_settlement_authorization_also_suppresses_final_session_expiry_flatten():
+    pos = {"cost_basis": "-100", "unrealized_pl": "0", "legs": [
+        {"expiry": "2026-09-03"}, {"expiry": "2026-09-03"},
+    ]}
+    assert not loop.position_exit_due(
+        pos, {}, et(3, 15, 10), RP, settlement_authorized=True)[0]
 
 
 def test_final_session_time_stop():

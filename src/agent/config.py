@@ -18,9 +18,13 @@ ET = ZoneInfo("America/New_York")
 PAPER_TRADING_URL = "https://paper-api.alpaca.markets"
 DATA_URL = "https://data.alpaca.markets"
 
-# Scored window: Mon 2026-08-31 09:30 ET through EOD Thu 2026-09-03.
+# FAQ distinguishes the economic mark from the formal measurement endpoint.
 WINDOW_OPEN = dt.datetime(2026, 8, 31, 9, 30, tzinfo=ET)
-WINDOW_CLOSE = dt.datetime(2026, 9, 3, 16, 0, tzinfo=ET)
+EOD_EQUITY_MARK = dt.datetime(2026, 9, 3, 16, 0, tzinfo=ET)
+MEASUREMENT_END = dt.datetime(2026, 9, 4, 9, 30, tzinfo=ET)
+# Compatibility/economic-horizon name used by valuation code. Options are valued
+# at Thursday EOD, not at Friday's post-window snapshot timestamp.
+WINDOW_CLOSE = EOD_EQUITY_MARK
 
 # Total equity, not realised cash, is scored at WINDOW_CLOSE.  Contract expiry is
 # therefore not an eligibility boundary: any active broker-listed option can
@@ -104,7 +108,7 @@ def profile(name: str) -> Profile:
 
 def in_scored_window(now: dt.datetime | None = None) -> bool:
     now = (now or dt.datetime.now(dt.timezone.utc)).astimezone(ET)
-    return WINDOW_OPEN <= now <= WINDOW_CLOSE
+    return WINDOW_OPEN <= now < MEASUREMENT_END
 
 
 def assert_paper(url: str) -> None:

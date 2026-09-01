@@ -112,3 +112,35 @@ def test_missing_underlying_does_not_invent_expiry_pnl():
         structure, None, {}, {}, dt.datetime(2026, 8, 31, 14, 0, tzinfo=ET), DEFAULT)
     assert row["spot"] is None
     assert row["pnl_if_expired_now_per_unit"] is None
+
+
+def test_finite_debit_profit_target_is_half_maximum_profit_not_half_debit():
+    structure = {
+        "structure_id": "sid-debit", "thesis_id": "th-debit", "underlying": "QQQ",
+        "family": "vertical_put", "qty": 8, "cost_basis": 2568,
+        "unrealized_pl": 0, "premium_at_risk": 2568,
+        "legs": [
+            {"symbol": "QQQ260902P00709000", "ratio_qty": 1, "side": "buy",
+             "position_intent": "buy_to_open", "strike": 709,
+             "option_type": "put", "expiry": "2026-09-02"},
+            {"symbol": "QQQ260902P00699000", "ratio_qty": 1, "side": "sell",
+             "position_intent": "sell_to_open", "strike": 699,
+             "option_type": "put", "expiry": "2026-09-02"},
+        ],
+    }
+    thesis = SimpleNamespace(
+        exit_at="2026-09-02T15:00:00-04:00",
+        enforced_exit_policy={
+            "schema_version": 2, "candidate_id": "c",
+            "profit_target": {"kind": "maximum_profit_fraction", "value": .5}})
+    quotes = {
+        "QQQ260902P00709000": {"bp": 4, "ap": 4.1},
+        "QQQ260902P00699000": {"bp": 1, "ap": 1.1},
+    }
+    row = portfolio.snapshot(
+        {"equity": 100_000}, {"structures": [structure], "premium_at_risk": 2568,
+                               "realised_loss": 0}, {"th-debit": thesis}, quotes,
+        {"QQQ": 705}, dt.datetime(2026, 9, 1, 14, 0, tzinfo=ET), DEFAULT
+    )["structures"][0]
+    assert row["profit_target"] == pytest.approx(2716)
+    assert row["profit_target"] != pytest.approx(1284)
