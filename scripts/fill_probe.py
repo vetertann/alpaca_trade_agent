@@ -184,7 +184,7 @@ def main() -> None:
 
     load_env()
     prof = profile("dev")                      # never the competition account
-    rest = Rest(prof)
+    rest = Rest(prof, execution_transport="cli")
     account = rest.account()
     now = dt.datetime.now(ET)
     clock = rest.clock()

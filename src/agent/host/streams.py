@@ -40,6 +40,8 @@ class Handlers:
 def _ts(raw) -> dt.datetime:
     if not raw:
         return dt.datetime.now(dt.timezone.utc)
+    if isinstance(raw, msgpack.Timestamp):
+        return raw.to_datetime()
     if isinstance(raw, dt.datetime):
         return raw if raw.tzinfo else raw.replace(tzinfo=dt.timezone.utc)
     return dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))

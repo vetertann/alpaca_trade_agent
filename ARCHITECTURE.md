@@ -1,6 +1,7 @@
 # Architecture — Adaptive Alpaca Options Code Agent
 
-Revision 4, 2026-08-29. Adds the decision-program model, runtime state, failure policy, and the trigger architecture.
+Revision 5, 2026-09-01. Adds executable correlated-book stress, evidence-owned
+sizing, exact feasible-quantity solving, and post-fill calibration.
 
 ---
 
@@ -24,24 +25,22 @@ Fri Sep 04   09:30 ET equity snapshot · 11:00 ET submission deadline
 
 Alpaca's guidance carries an internal contradiction: the measurement window is stated as Monday 09:30 through Friday 09:30, and the measured value is stated as **"the portfolio's total equity as of EOD Thursday Sep 3rd."** Friday's snapshot falls at the opening bell, so no Friday trading is possible in either reading.
 
-**Operative rule: four sessions, ending Thursday September 3 at 16:00 ET.** The portfolio must be at its target posture by Thursday's close, with overnight gap exposure into Friday's open minimised so the two readings agree.
+**Operative rule: four sessions, ending Thursday September 3 at 16:00 ET.** The measured object is total account equity, not realised cash. The portfolio must be at its target marked posture by Thursday's close; an option need not expire or be sold by then for its value to count.
 
 Alpaca states that exercises and assignments for contracts expiring September 3 are reflected in the Thursday EOD value. That mechanism is not something the strategy depends on: non-trade activities post the following day, assignment can occur after the close, and Alpaca begins its own expiry risk management around 15:30 ET.
 
-**Design rule: expiry processing is not part of the strategy.** Anything that matters to the score is explicitly closed, or intentionally left in a known marked state, before the cutoff. Score should never rest on post-close mechanics we do not control.
+**Design rule: expiry processing is not part of the strategy.** September 3 contracts are closed before broker expiry handling. Later-dated contracts may intentionally remain as a known marked position at the cutoff; their score contribution is valued with residual time value, not terminal payoff.
 
 Build time before going live: this weekend.
 
-### Accounts
+### Account
 
-Alpaca requires the scored account to be separate from the account used for development: *"An account used for testing should not be used for the official measurement."*
-
-Separate competition and development paper accounts are configured at runtime.
+The submitted system trades one Alpaca paper account. Its identity is configured at
+runtime and asserted again before every order.
 
 | Role | Account ID | Number | Use |
 |---|---|---|---|
-| **Competition** | `ALPACA_ACCOUNT_ID` | Competition credentials | No test orders. The identifier remains outside source control. |
-| **Development** | `DEV_ALPACA_ACCOUNT_ID` | Development credentials | All testing, calibration, and order rehearsals. |
+| **Competition** | `ALPACA_ACCOUNT_ID` | Competition credentials | Judged trading only. The identifier remains outside source control. |
 
 ### Credentials
 
@@ -50,7 +49,6 @@ Held in `.env`, which is excluded from the repository. Names only appear below; 
 | Variable | Purpose |
 |---|---|
 | `ALPACA_ACCOUNT_ID` / `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` | Competition account identifier and credentials. |
-| `DEV_ALPACA_ACCOUNT_ID` / `DEV_ALPACA_API_KEY` / `DEV_ALPACA_SECRET_KEY` | Development account identifier and credentials. |
 | `NEBIUS_API_KEY` | Nebius AI Studio. |
 | `FEATHERLESS_API_KEY` | Featherless AI, added when the second provider lands. |
 
@@ -58,7 +56,8 @@ Held in `.env`, which is excluded from the repository. Names only appear below; 
 
 Rules the host enforces on startup:
 
-- The active profile is selected **explicitly**; there is no default. A run that does not name `competition` or `dev` refuses to start.
+- The active profile is selected **explicitly**; there is no default. The submitted
+  service names `competition` and refuses to start without a profile.
 - Each profile asserts that Alpaca returns the account ID configured for that profile.
 - The `competition` profile also asserts that the clock is inside the scored window before every order.
 - Both key prefixes are checked for `PK`, and the resolved trading endpoint must be `https://paper-api.alpaca.markets`.
@@ -93,8 +92,8 @@ From Alpaca's official guidelines and FAQ, which supersede the kickoff chat.
 | **No risk-adjusted metrics.** No Sharpe, Sortino, or drawdown | Terminal equity is the only performance number. |
 | Judged on P&L **and** the *creativity, autonomy, and robustness of the agent trading workflow*; winners are not selected on P&L alone | The workflow is a first-class deliverable. |
 | **A user interface is not required.** A repository suffices for an agent that only places orders | No dashboard app. |
-| **MCP or CLI preferred.** Using an SDK directly requires a clear written justification, with official SDKs prioritised | Execution routes through MCP or CLI. |
-| MCP option orders support **market, limit, stop, and stop-limit**; trailing stops are equities-only | Stop-based exits are available. |
+| Must use the **Alpaca MCP server or Alpaca CLI** | Execute-mode account and order lifecycle calls route through the official Alpaca CLI. |
+| Limit orders support multi-leg position intents | Entries and closing orders use explicit multi-leg limit requests. |
 | No restrictions on options strategies | 0DTE and every defined-risk structure permitted. |
 | Backtests and simulated shocks are **encouraged** in the repo and write-up as evidence of guardrails | Shock simulation is a scored artifact. |
 | External data permitted; scipy and statsmodels welcome, named in the README | |
@@ -149,19 +148,27 @@ An LLM writes a Python program that carries a decision from observation through 
           │  rate limiting · audit log    │
           └───────────────┬───────────────┘
                           │
-              ┌───────────┴───────────┐
-              ▼                       ▼
-        LIVE ADAPTER            REPLAY ADAPTER
-        Alpaca MCP / CLI        frozen bars + trades
+              ┌───────────┼──────────────┐
+              ▼           ▼              ▼
+       ALPACA DATA    ALPACA CLI     DURABLE STATE
+       quotes/streams account/orders ledger/theses/policies
 ```
 
 The child blocks on each capability call. The host performs the request, runs the policy verifier, and returns the result. Credentials never enter the sandbox, and generated code reaches the broker only through verified capabilities.
 
 The transport is a pipe. Replacing it with HTTPS later leaves generated-code semantics unchanged.
 
-**Execution path.** Orders and account reads go through the **Alpaca MCP server**, which covers contracts, chains, quotes, and single- and multi-leg option orders. The CLI is installed alongside for inspection and for a human-readable command log. `alpaca-py` is used only where MCP lacks a capability, and every such use is named and justified in the README as the guidelines require.
+**Execution path.** In execute mode, account reads, positions, order listing,
+submission, lookup, and cancellation go through Alpaca's official CLI raw-API
+command. Credentials enter only the CLI child environment and never its arguments.
+Quotes, bars, streams, and option-contract metadata use the Trading/Data HTTP APIs
+directly because they are the high-volume read-only data plane. Deployment pins and
+checksum-verifies CLI v0.0.14.
 
-**Run modes.** `propose` halts after the program returns its intended orders. `execute` submits them. Development runs use `propose`; the scored window uses `execute`.
+**Run modes.** `propose` runs the complete decision and verification path but turns
+the final broker mutation into a structured proposal; `execute` permits guarded
+submission. Dry runs use `propose`. The submitted competition service uses
+`execute` with one durable ledger.
 
 ### Generated-code contract
 
@@ -170,8 +177,8 @@ The transport is a pipe. Replacing it with HTTPS later leaves generated-code sem
 - Programs return a structured result object; free-form output goes to the trace.
 - Execution failures return the traceback to the model for repair, with a bounded retry count.
 - Every reply is a single `{thought, code}` object. `thought` is one or two sentences of plan; `code` is executable Python only, no prose, no fences. Malformed replies get a typed repair message, up to three attempts.
-- The model may run up to three analysis rounds per cycle. **The namespace persists across rounds**, so round two reuses what round one loaded rather than re-fetching it. The round budget is enforced by the host.
-- Target one or two rounds. Round one batches every obvious computation into a single block; a second round is for a specific missing piece that round one revealed, not for exploring the same ground again.
+- The model may run up to three analysis rounds per cycle. **The namespace persists across rounds**, so round two reuses what round one loaded rather than re-fetching it. Before each later round the runtime injects one authoritative latest-state manifest listing persisted and dropped variable names and types. Previous code and compact observations remain in the short history, while old state manifests never accumulate. The round budget is enforced by the host.
+- Target one analysis program, but use the available follow-up when its observed output changes the decision. Every successful program that has not submitted an order or called `decision.no_trade(reason)` is nonterminal, so its stdout becomes the next observation automatically. This lets a simulation inform a fresh model judgement without a separate control action. The final round remains available for two-phase order confirmation, and explicit no-trade discards any unsubmitted draft.
 - Known error classes return a targeted hint alongside the traceback rather than the traceback alone.
 - Capability namespaces are read-only bindings; rebinding is rejected.
 - Every program is stored verbatim, hashed, and linked to the orders it produced.
@@ -182,7 +189,8 @@ The repair loop is mandatory. Generated code fails routinely, and unhandled fail
 
 ## 4. Capability API
 
-About twenty-five functions, each tested. The model composes the rest in the program itself.
+The capability surface is explicit and tested. The model composes these calls in the
+program it writes; no broker SDK or credential crosses into generated code.
 
 ### `TradeIntent` → `VerifiedTradeIntent`
 
@@ -214,57 +222,78 @@ Geometry stays with the model, pricing stays with the host.
 
 ### Layer 1 — primitives
 
-Identical signatures in live and replay.
+These are the live, host-mediated signatures exposed to generated programs.
 
 ```python
-market.bars(symbols, timeframe, start, end)
-market.snapshot(symbols)
+market.spot(symbol)
+market.bars(symbol, timeframe, start, end)
+market.session_range(symbol)
 market.latest_quote(symbols)
-market.calendar(start, end)
-market.news(symbols, limit)
+market.directional_context(symbol)                 # labelled 1/5/15/30/60m path
+market.news(symbols=None, limit=20)
 
-options.contracts(underlying, expiry_range, strike_range, type=None, status="active")
-options.chain(underlying, expiry_range)          # contracts joined to live quotes
-options.bars(symbols, timeframe, start, end)
-options.latest_quote(symbols)
+options.contracts(underlying, exp_gte, exp_lte)
+options.expiries(underlying)                       # every active listed expiry
+options.chain(underlying, exp_gte, exp_lte, around=None, width=10)
+options.tradeable_chain(underlying, exp_gte, exp_lte, around=None, width=10,
+                        max_spread_pct=None)
+options.enumerate(underlying, exp_gte, exp_lte, families=None,
+                  widths=(1,2,3,5,10), width=10, max_spread_pct=None,
+                  min_risk_reward=0.50, max_loss_cap=None, limit=240)
+options.greeks(symbol, spot=None, iv=None)
+options.payoff(legs, net_price, qty=1)
 
-account.state()                                   # account + positions + open orders
-orders.status(order_id)
+account.state()
 ```
 
 ### Layer 2 — domain and policy
 
 ```python
-vol.realized(symbol, window)                      # EWMA and close-to-close
-vol.implied(contract, spot, rate)                 # local Black-Scholes
-vol.expected_move(chain, dte)                     # from the ATM straddle
-vol.state(symbol)                                 # IV against realized, percentile
+vol.realized(symbol, lookback=60, window=20)
+vol.implied(price, spot, strike, t_years, option_type)
+vol.measures(symbol, days, sigma=None, skew=0.15)
+vol.evaluate(candidate_id, measure_handle)
+vol.evaluate_many(candidate_ids, measure_handle)
+vol.rank(candidate_ids, measure_handle, top_k=3)
 
-options.greeks(contract, spot, rate)              # local, all five
-options.payoff(structure, price_grid)             # piecewise terminal payoff
-options.tradeable_chain(underlying, filters)      # liquidity-gated chain
-options.enumerate(chain, families, filters)       # candidate structures
-options.evaluate(structure, measure)              # normalized economics
+risk.max_loss(legs, net_price, qty=1)
+risk.max_profit(legs, net_price, qty=1)
+risk.exposure()
+risk.structures()
+risk.direction(candidate_id, sigma, days)         # geometry + market alignment
 
-oi_gamma.profile(chain, spot)                     # OI-weighted gamma per strike
-oi_gamma.flip_point(chain, spot)                  # sign change under a stated convention
-oi_gamma.concentration(chain, spot)               # heaviest OI-weighted gamma near spot
+trading.preview(intent)
+trading.execute(intent)                            # two-phase entry
+trading.execute_if(intent, max_entry_debit=None, min_entry_credit=None,
+                   valid_for_seconds=30)           # fresh-price two-phase entry
+trading.close(structure_id, reason)                # risk-reducing, host priced
+trading.close_if(structure_id, min_executable_profit, reason)
+trading.set_entry_trigger(intent, max_entry_debit=None, min_entry_credit=None,
+                          valid_for_seconds=60, max_spot_drift_pct=0.3,
+                          reason="...")
+trading.set_exit_trigger(structure_id, min_executable_profit,
+                         valid_for_seconds=3600, reason="...")
+trading.remove_trigger(trigger_id, reason)
+trading.list_triggers()
+trading.set_exit_policy(structure_id, activation_profit,
+                        max_profit_giveback, minimum_locked_profit=0,
+                        confirmation_samples=2, reason="...")
 
-risk.max_loss(structure_or_portfolio)             # Alpaca universal spread rule
-risk.budget_check(structure, portfolio, budget)
-risk.exposure(portfolio)                          # net delta, gamma, vega, notional
-
-trading.preview(structure)
-trading.execute(structure)
-trading.close(position_or_structure)
-trading.reconcile()
-
-thesis.open(hypothesis, structure, exits)         # exits include price, time, and news invalidation
+decision.no_trade(reason)
+thesis.open(hypothesis, underlying, exit_profit, exit_invalidation, exit_time,
+            exit_news="", evidence_refs=None, gates=None)
 thesis.list(status="open")
-thesis.update(thesis_id, note, status)
+thesis.history(limit=20)
+thesis.close(thesis_id, reason, realised=None)
+thesis.note(thesis_id, note)
 ```
 
-The `oi_gamma` namespace is named for what it measures. Open interest records how many contracts exist at a strike; it does not record who is long and who is short. Converting it to dealer positioning requires an assumption — conventionally that dealers are short calls and long puts against retail flow — and that assumption is a heuristic, not an observation. The functions therefore expose an OI-weighted gamma profile with the sign convention stated as a parameter, and the write-up says so. Calling it dealer gamma would claim knowledge of positioning we do not have.
+`market.directional_context` reports observed quote-midpoint path, never volume or
+order flow: return by horizon, normalized displacement, path efficiency, position
+inside the observed session range, coverage, freshness, and SPY/QQQ/IWM agreement.
+`risk.direction` joins those facts to candidate bias, breakeven distance,
+expected-move scenario P&L and the resulting book delta. The separation prevents an
+IV/realized-volatility comparison from being misrepresented as directional evidence.
 
 `risk.max_loss` implements Alpaca's own maintenance-margin method: intrinsic value at every strike present in the structure, payoffs netted at each point, worst point taken, evaluated per expiration with the largest requirement across expirations. Matching Alpaca's method keeps the agent's risk model aligned with actual buying power and prevents rejection at submission.
 
@@ -272,7 +301,12 @@ The `oi_gamma` namespace is named for what it measures. Open interest records ho
 
 Staging costs one cheap round trip and only when actually trading. What it buys is a second look at precisely the moment that matters, with the gate results visible rather than assumed.
 
-On confirmation the call runs the full deterministic sequence: read account state, verify contracts, confirm two-sided quotes inside the spread limit, compute bounded max loss, enforce the risk budget, construct position intents, submit through MCP with a deterministic `client_order_id`, manage the fill, confirm, reconcile. Mandatory behaviour lives here rather than in the prompt.
+On confirmation the call runs the full deterministic sequence: read account state,
+verify contracts, confirm two-sided quotes inside the spread limit, calculate the
+minimum quantity allowed by all current headrooms, recompute the order economics and
+gates at that quantity, construct position intents, persist the exact request, submit
+it through the official Alpaca CLI, and reconcile by `client_order_id`. Mandatory
+behaviour lives here rather than in the prompt.
 
 ### Helper classes
 
@@ -280,44 +314,24 @@ Every capability falls into one of three classes, and the name says which.
 
 | Class | Property | Examples |
 |---|---|---|
-| **Read / normalize** | Deterministic, no side effect, safe to call freely | `options.chain`, `vol.state`, `gamma.exposure` |
-| **Pure selector** | Operates on already-retrieved data; succeeds only on an unambiguous result, otherwise returns `AMBIGUOUS` or `NOT_FOUND` | `options.enumerate`, `options.evaluate` |
-| **Guarded action** | Touches policy or the broker; suffixed `_guarded` where it wraps a raw capability; two-stage where it moves money | `trading.execute`, `trading.close_guarded` |
+| **Read / normalize** | Deterministic, no side effect, safe to call freely | `market.directional_context`, `options.chain`, `risk.structures` |
+| **Pure analysis / selector** | Operates on host-held data and returns measurements or an explicit failure | `options.enumerate`, `vol.evaluate`, `vol.rank`, `risk.direction` |
+| **Guarded action** | Touches durable policy or the broker; the host validates every argument and records the result | `trading.execute_if`, `trading.close_if`, `trading.set_entry_trigger`, `trading.set_exit_policy` |
 
 A guarded action never silently claims success, never invents a capability it lacks, and never picks arbitrarily among several valid options. When the tool surface cannot satisfy it, it returns a stated limitation and the cycle records that outcome.
 
-### Layer 3 — the agent's own extensions
+### Deferred extensions are not runtime capabilities
 
-Two capabilities exist so the agent can test its own reasoning and grow its own toolkit.
+Historical replay and agent-installed helpers were explored during design but were
+cut from the competition build. Historical option quotes are unavailable, so a
+spread replay would depend on modelled fills at precisely the point where execution
+friction matters most. Allowing generated code to install durable helpers would
+also broaden the state and review surface during a four-session event.
 
-```python
-replay.window(start, end)                         # returns a replay-backed capability set
-learned.save(name, source)                        # persist a helper for later programs
-learned.list()
-```
-
-`replay.window` hands the program a capability set backed by frozen bars and trades over a past interval. Signatures match live where the data supports it, and **every replay result is wrapped in a provenance envelope** so identical signatures never disguise a different epistemic status:
-
-```json
-{ "value": 2.41, "provenance": "MODELED", "source": "spread_haircut_v2", "as_of": "2026-07-14T15:30:00Z" }
-```
-
-`provenance` is one of `MEASURED`, `MODELED`, or `UNAVAILABLE`. Bars and trades come back `MEASURED`. Anything derived from a modelled spread comes back `MODELED` with the model named.
-
-**`latest_quote` is not implemented in replay.** Historical option quotes do not exist, so a function claiming to return one would be fabricating its central value. It returns `UNAVAILABLE`, and a program needing entry economics over history must ask for a modelled price explicitly and receive it labelled as such.
-
-The agent uses replay to measure a hypothesis before trading it, which turns falsification into a measurement — while keeping visible which parts of that measurement are observations and which are assumptions.
-
-`learned.save` writes a helper into a `learned/` module that subsequent programs import. Functions the agent writes for itself accumulate across the window, and the resulting diff is a record of the system extending its own capability API.
-
-Self-modification during a scored window is the single feature most able to undermine everything else in this document, so it is constrained to **pure analysis**:
-
-- Static AST check before installation. No imports beyond an allowlist of numerical packages, no I/O, no attribute access into capability namespaces.
-- **No capability or action calls.** A saved helper cannot trade, cannot read the broker, cannot touch the thesis store, and cannot alter a risk parameter or a gate.
-- The helper must execute against a fixture and return a finite result before it is promoted.
-- Once installed it is immutable and content-hashed. A revision is a new name, so a program's behaviour is always attributable to a specific version.
-
-The agent extends its analytical toolkit. It cannot reach the safety architecture, which is what makes the feature safe to run unattended for four days.
+Generated programs may carry ordinary Python values and objects between the rounds
+of **one decision cycle**. The next prompt receives a latest-only manifest of the
+names that actually survived. Code, printed observations and old manifests do not
+accumulate indefinitely, and no generated object becomes a new host capability.
 
 ---
 
@@ -406,7 +420,8 @@ Spot drifts, so a strike window centred at the open watches the wrong contracts 
 
 ### Measured limits
 
-Tested against the development account on 2026-08-29. These are observations, not documentation.
+Measured during the isolated order-path rehearsal on 2026-08-29. These are
+observations, not API-documentation assumptions.
 
 | Test | Result |
 |---|---|
@@ -446,8 +461,24 @@ Every position traces to a thesis. Every thesis carries its invalidation conditi
 
 ### Idempotency and restart
 
-- Every order carries a deterministic `client_order_id` derived from `thesis_id`, structure hash, and cycle timestamp. A retry after an ambiguous failure collides rather than duplicating.
-- On startup the host reconciles from broker state as the source of truth, then repairs the local store to match. Broker state wins on every disagreement.
+- Before any broker call, the exact canonical request is fsynced as `PRE_SUBMIT`.
+  Broker identity uses a fingerprint over legs, ratios, sides, quantity, limit and
+  TIF; in-flight action dedupe uses only `structure_id + purpose`, so repricing
+  cannot mint a duplicate exit.
+- A timeout, transport failure, 408, 5xx, or duplicate-client-id 422 becomes
+  `UNKNOWN`, never rejected. Exact-ID lookup adopts only a semantic match. A 404 is
+  not absence until the record is at least 15 seconds old and a delayed second query
+  also returns 404; at most one retry reuses the exact ID and body.
+- Unresolved records reconcile with per-record backoff, exits first. They freeze new
+  entries but never stop exit management. Successful reconciliation clears the
+  freeze automatically; a canonical mismatch latches and is rendered loudly.
+- Startup also scans open orders with our client-ID prefixes and freezes entries if
+  it finds one without a durable intent.
+- Rolling series and runtime scheduling state are atomically checkpointed. A fresh
+  same-session state restores; a stale bundle and trigger baseline are discarded and
+  rebaselined. Within one decision cycle, safe small Python values persist between
+  program rounds and are named in a latest-only manifest; staged drafts and
+  per-cycle sandbox state never survive a process restart.
 - The trade updates stream is subscribed before any order is submitted, so fills are observed rather than polled for.
 
 ### Degraded modes
@@ -458,7 +489,7 @@ Robustness is named in the judging criteria, so degradation is designed rather t
 |---|---|
 | LLM unreachable or over budget | Role falls to the next provider in its chain, substitution logged. Only when the chain is exhausted does the watcher continue alone, exits still firing, no new entries. |
 | Generated code fails past the retry limit | Cycle abandoned, logged as a failure with the traceback, next trigger proceeds normally. |
-| MCP error mid-submission | Reconcile against broker state, resolve by `client_order_id`, resume or abandon. |
+| CLI timeout or ambiguous submission | Keep `UNKNOWN`, freeze entries, continue exits, and reconcile by exact `client_order_id` with bounded backoff. |
 | Quote feed stale or one-sided | Liquidity gate blocks entry. Exits may still use market orders. |
 | Risk budget exhausted | Entries blocked, management and exits continue. |
 | Any invariant assertion fails | Halt trading, alert, hold current positions. |
@@ -471,7 +502,8 @@ Every blocked and rejected order is retained as evidence rather than discarded.
 
 Every ranking depends on a real-world distribution, since risk-neutral pricing assigns approximately zero expected return to every candidate. A single distribution can manufacture edge, and at zero-to-five days to expiry the tail shape dominates — which matters most in exactly the comparison we care about, long gamma against defined-risk credit, since those hold opposite tail exposures.
 
-Three independent measures, therefore, and a candidate is judged on whether it survives all of them.
+Three independent measures, therefore, and a candidate is judged on both its median
+edge and the amount of model agreement supporting it.
 
 | Measure | Construction | What it is good at |
 |---|---|---|
@@ -479,7 +511,7 @@ Three independent measures, therefore, and a candidate is judged on whether it s
 | **B · Empirical block bootstrap** | Resampled blocks of historical returns at matching horizon | Makes no shape assumption; captures observed clustering |
 | **C · Fat tail** | Student-t or jump mixture, calibrated to the same sample | Prices the tail that A structurally understates |
 
-`options.evaluate` returns an edge under each, plus the agreement between them:
+`vol.evaluate` returns an edge under each, plus the agreement between them:
 
 ```json
 {
@@ -491,7 +523,12 @@ Three independent measures, therefore, and a candidate is judged on whether it s
 }
 ```
 
-**A candidate attractive under only one convenient distribution is not traded.** `ranking_stability` is the fraction of measures under which the candidate holds its rank band, and it is a gate rather than a decoration — a structure whose appeal evaporates when the tail is modelled honestly was never edge, it was a modelling artifact.
+**A candidate attractive under only one convenient distribution is not traded.**
+`ranking_stability` is the fraction of measures under which the candidate holds its
+rank band. Three positive measures and stable rank support normal sizing; two
+positive measures with positive median edge can trade at no more than 1% equity
+risk, with the dissent recorded. Disagreement reduces size instead of becoming an
+unconditional cash veto.
 
 The disagreement is informative in itself. Long gamma tends to look better under C than under A; credit spreads tend to look better under A than under C. A candidate that leads under all three is a genuinely different object from one that leads under its favourite.
 
@@ -523,12 +560,16 @@ The disagreement is informative in itself. Long gamma tends to look better under
 Paper fills price against live quotes, so crossing the spread is the real cost and no additional slippage is simulated. Getting filled at all determines whether P&L exists.
 
 - **Universe.** SPY, QQQ, IWM, plus a small set of high-volume single names, where multi-leg fills are realistic.
-- **Tenor.** Zero to five days to expiry, so the scored window is most of the contract's life and gamma dominates.
+- **Tenor.** Every active broker-listed expiry is eligible. There is no local calendar cutoff. Every candidate is evaluated at the earlier of expiry and the Thursday equity mark; later contracts retain residual time value and IV sensitivity. Broad searches stay inside generated Python, are sampled across expiry and family, and return only compact coverage and rankings to the next model turn.
 - **Warm-up window.** No entries in the first ten minutes of the session. Option spreads are at their widest into the opening auction, and a gate calibrated on mid-session quotes misbehaves at 09:30 in both directions.
-- **Order construction.** `order_class: "mleg"` with a `legs` array carrying `symbol`, `ratio_qty`, `side`, and `position_intent`, submitted as a limit order through MCP with a deterministic `client_order_id`.
+- **Order construction.** `order_class: "mleg"` with a `legs` array carrying `symbol`, `ratio_qty`, `side`, and `position_intent`, submitted as a limit order through the official Alpaca CLI with a deterministic `client_order_id`.
 - **Fill management.** Open at mid, reprice toward the far side in fixed steps on a timer, cancel and reassess on timeout, reconcile partial fills before the next decision. A partially filled multi-leg structure is repaired or closed before any new entry.
 - **Liquidity gate.** Two-sided quotes on every leg and a maximum spread as a fraction of mid, enforced in the host before submission. The threshold is calibrated against the **Indicative feed** we actually receive rather than against OPRA-derived intuitions.
-- **Exits.** Stop and stop-limit orders are available for options through MCP and back the time-stop and invalidation exits.
+- **Exits.** Deterministic profit, reachable short-premium loss, exact thesis-time,
+  expiry-day, and expiring-book final-session triggers submit closing limit orders with short
+  legs bought back first. Market/news cycles may close an exact reconciled
+  `structure_id` when a written thesis invalidation is observed. Active-action
+  dedupe remains stable across repricing.
 
 ### Early assignment
 
@@ -540,9 +581,7 @@ SPY, QQQ, and IWM options are **American style**, confirmed from the contracts e
 
 ### Window close
 
-The book reaches target posture by **Thursday September 3, 16:00 ET**. Positions expiring that day settle into the measured equity through exercise and assignment.
-
-Overnight gap exposure into Friday's open is minimised. This is not precautionary: the BLS Employment Situation for August 2026 is scheduled for **Friday 4 September at 08:30 ET**, one hour before a 09:30 snapshot. Combined with the ambiguity in Alpaca's own measurement text, carrying risk into Friday's open means carrying the largest scheduled macro event of the window, entirely outside the intended strategy, on a reading of the rules that may not even be the one used.
+The book reaches its target **marked-equity posture** by Thursday September 3, 16:00 ET. Positions expiring that day are flattened before broker expiry handling. Later-dated positions need not cross the spread merely to turn a broker mark into cash; the host values them at Thursday close with Black–Scholes residual time value, current per-leg implied volatility, and observed half-spread friction.
 
 ---
 
@@ -568,11 +607,43 @@ Because all four streams are held in one process, everything a decision needs is
 - **WINDING DOWN** — exits and repairs only, so the book is deliberate rather than accidental at the close.
 - **CLOSED** — reconcile, mark the book, write the daily trace segment. Tier 0 idles.
 
-Thursday September 3 is the last scored session. Its WINDING DOWN begins at 15:00 rather than 15:45, and its objective is the final posture rather than an overnight one.
+Thursday September 3 is the last scored session. Its WINDING DOWN begins at 15:00 rather than 15:45. Expiring and metadata-unknown positions flatten; later-dated positions remain subject to profit, loss, thesis and explicit model-directed exits instead of blanket liquidation.
 
 ### Three tiers
 
-**Tier 0 — continuous, no LLM.** Consumes the four streams, maintains the rolling series, marks the book with locally computed Greeks, evaluates exit conditions from the thesis store and acts on them, re-centres the option window, detects assignment, and enforces the rate limiter. Most of what the system does in a session happens here at no model cost.
+**Tier 0 — continuous, no LLM.** Consumes the four streams, maintains the rolling series, samples broker equity and every normalized structure at ten-second cadence, joins executable closing quotes to durable entry cash flows, evaluates exit conditions from the thesis store and acts on them, re-centres the option window, detects assignment, and enforces the rate limiter. Most of what the system does in a session happens here at no model cost.
+
+The decision program may also delegate a structure-specific adaptive profit policy
+to Tier 0: an executable-profit activation level, maximum giveback from the observed
+high-water mark, minimum locked profit, and confirmation count. The policy and its
+high-water state are fsynced, survive restart, and can only be tightened. Tier 0
+updates it only from valid executable closing quotes—not broker marks or aggregate
+equity—and submits the close without waiting for another model turn. Hard loss,
+thesis, expiry, and expiring-book final-session exits remain authoritative. Once any exit is
+pending, new entries are frozen until reconciliation reaches a terminal outcome.
+
+Price-sensitive actions have a separate latency contract. An immediate entry may
+carry a maximum debit or minimum credit, and a discretionary close may carry a
+minimum whole-structure executable profit. The host re-evaluates that boundary
+from fresh bid/ask immediately before submission; an expired or failed boundary
+never turns into a market-chasing order.
+
+The model can instead arm a durable one-shot action trigger. Entry triggers bind
+the complete canonical intent and its evidence for at most 120 seconds, cap
+underlying drift, and re-run every admission gate when they fire. Exit triggers
+bind an exact reconciled structure and conservative executable P&L. Tier 0 checks
+only while a trigger is active, once per second, and uses a deterministic broker
+ID so restart recovery cannot duplicate the action. Active conditions and recent
+terminal outcomes return in preflight and the panel with labelled states, last
+observations, failed gate names and remaining life. A fire-time host-gate refusal
+from quote validity or spread quality is labelled `waiting_data`, remains active,
+and retries after a five-second backoff. Portfolio-scenario, budget, buying-power,
+concentration, economics, or zero-headroom refusals terminate the authorization as
+`blocked_risk`. Other operational refusals terminate as `failed`. A durable risk
+block remains visible and may grant an urgent model review, limited to three per ET
+session and always charged against the ordinary session cycle cap.
+Discretionary triggers may be removed; mandatory loss, thesis, expiry and final-
+session exits are separate invariants and cannot be removed through this API.
 
 **Tier 1 — trigger evaluation, no LLM.** Recomputes the derived signals below on each tick and tests them against thresholds. Nothing escalates until a predicate fires.
 
@@ -587,15 +658,31 @@ realized_vol_intraday    from the in-memory minute series
 iv_atm                   local Black-Scholes over streamed option quotes
 iv_rv_ratio              the core volatility-state signal
 expected_move_consumed   session range against the chain-implied daily move
+directional_context      1/5/15/30/60m returns, normalized displacement,
+                         path efficiency, session-range position, sample coverage,
+                         and SPY/QQQ/IWM confirmation from quote midpoints
 portfolio_delta / vega   summed from marked positions
 pnl_vs_max_loss          per position, and for the book
 time_remaining           to session close, and to Thursday 16:00
-oi_weighted_gamma        open-interest-weighted gamma by strike, with sign
-                         change and concentration; refreshed with the daily
-                         contract cache since open interest updates overnight
 ```
 
-The volatility-state comparison is our central edge signal, and it costs nothing to maintain. It belongs in Tier 0 as a number rather than in Tier 2 as a discovery.
+The volatility-state comparison is our central edge signal, and it costs nothing to
+maintain. It belongs in Tier 0 as a number rather than in Tier 2 as a discovery.
+Term structure is exposed as observables (`front_iv`, `next_iv`, absolute slope,
+relative slope), not as an uncalibrated blackout gate. IV/RV is also shown across
+5/10/20/60-session lookbacks so a window choice cannot masquerade as an observation.
+
+Direction is a separate evidence channel. A same-cycle entry must call
+`market.directional_context` for the exact underlying and `risk.direction` for the
+exact evaluated candidate. The host classifies the structure as volatility-led,
+mixed, or direction-led and joins its bias to the observed market label. A
+direction-led conflict is refused; neutral or insufficient evidence is capped at
+0.75% requested risk and aligned directional exposure at 3%. Mixed structures use
+the same caps and are refused when conflicted. A genuinely volatility-led,
+near-delta-neutral candidate is governed by ensemble evidence, resulting-book
+scenarios and cluster concentration rather than an unrelated tape cap. The raw
+fields remain visible so the label is auditable, and the rule does not turn a rising
+tape into an automatic bull-call order.
 
 ### Preflight observation bundle
 
@@ -607,11 +694,18 @@ Tier 0 already holds streamed prices, the rolling series, and account state, so 
 trigger        which predicate fired, its measured value, time since last cycle
 account        equity, cash, buying power, options buying power, margin used
 book           open positions with marks, local Greeks, unrealized P&L against max loss
+portfolio      durable structure ids, executable close values, broker/executable P&L,
+               current midpoint-to-close friction, leg quote quality, breakevens,
+               stop progress, exit deadline, bounded trajectories, and explicitly
+               backward-looking executable-P&L variation statistics; correlated
+               executable scenario loss, cap, binding shock, breach and provenance
 theses         open theses with hypotheses, exit conditions, and distance to each
-universe       per underlying: spot, session range, EWMA realized vol, ATM IV,
-               IV/RV ratio and percentile, chain-implied expected move, term structure
+universe       per underlying: spot, session range, realized vol and IV/RV at
+               5/10/20/60 sessions, front/next ATM IV, absolute/relative slope,
+               and clearly sourced multi-horizon directional context
 liquidity      per candidate expiry: top-of-book spread distribution, quoted depth
-calendar       session boundaries, time remaining in the scored window, DTE per position
+calendar       session boundaries, time remaining, DTE, and source-labelled official
+               release times; timing context only, with no outcome or blackout inference
 diff           what changed since the previous cycle
 ```
 
@@ -624,28 +718,50 @@ Four properties follow from collecting this way:
 - **Fail cheap.** A broken feed surfaces before any tokens are spent.
 - **Reproducible.** The bundle is hashed and stored, so a cycle replays exactly. A program-authored observation would differ run to run and make cycles incomparable.
 - **Cacheable.** A stable bundle schema keeps the prompt preamble byte-identical across cycles, so provider-side prompt caching applies to everything except the payload.
-- **Symmetric with replay.** The replay bundle has the same shape, built by the same clock-aware collector, so prompts transfer unchanged and look-ahead is prevented by construction rather than by discipline.
+- **Clock-aware.** Session labels and cutoffs are derived in `America/New_York`, so the VPS locale cannot shift a trigger or time stop.
 
 The division of labour is clean: preflight answers what is true right now, and the generated program answers what would need measuring to test this particular idea.
 
-Bundle fields are extensible by the agent. A program that repeatedly derives the same quantity can register it through `learned.save`, and subsequent cycles receive it in `obs` without writing code for it.
+The bundle schema is host-owned and versioned. Generated code may derive additional
+values for the later rounds of its current cycle, but cannot alter the observation
+schema or install a new capability for future cycles.
 
 ### What escalates to Tier 2
 
 | Trigger | Condition | Expected frequency |
 |---|---|---|
+| **Active-session startup** | Service starts or restarts while entries are allowed | once per process start |
 | **Session anchors** | 09:45 · 11:00 · 14:00 · 15:30 ET | 4 per session |
-| **Underlying move** | Session range consumes more than 0.5× the chain-implied expected daily move since the last cycle | 1–2 per session |
+| **Portfolio-build review** | Correlated scenario loss below 3.5%, operational capacity available, and no decision cycle for 20 minutes | as needed while qualified marginal opportunities remain |
+| **Underlying move** | Spot moves more than 0.5× the ATM-IV-implied daily move since the last cycle | 1–2 per session |
 | **Volatility shift** | `iv_rv_ratio` moves more than 10% relative since the last cycle | under 1 per session |
-| **Position P&L band** | Unrealized crosses the profit target, or the credit-multiple stop on short-premium structures | event-driven |
-| **Greek drift** | Portfolio delta or vega leaves its budgeted band | event-driven |
-| **Fill completion** | A structure fills, opening a new management question | 1 per entry |
+| **Portfolio deterioration** | Equity or one structure deteriorates materially from the last decision baseline | as needed |
+| **Portfolio scenario breach** | Correlated executable stress first exceeds 4.0% of equity | rare, urgent |
+| **Stop approach** | A short-premium structure crosses 50% progress toward its deterministic stop | rare, urgent |
+| **Breakeven cross** | Current expiry payoff crosses from profitable to unprofitable | as needed |
+| **Fill update** | A structure partially or completely fills, opening a new management question | 1+ per entry |
 | **Assignment** | Equity position appears where an option leg was | rare, urgent |
-| **Tenor roll** | An open position enters its final session | 1 per position |
 | **News salience** | Triage flags a headline as material for a held or watched underlying | 1–3 per session |
 | **Deployment floor** | No position open by Monday 10:30 ET | once, at most |
 
 Anchors are chosen rather than uniform. 09:45 follows the opening auction once spreads normalise; 15:30 is the last point at which an overnight decision can be made deliberately.
+The dispatcher evaluates these predicates every ten seconds against live stream
+spots and one-minute refreshed short-dated IV, never against the previous preflight
+bundle compared with itself. Underlying, volatility, portfolio-deterioration and
+news triggers share a five-minute debounce and the session cycle cap. Fill,
+assignment, first crossing of the stop-approach threshold, the first portfolio-
+scenario breach, and an admitted blocked-trigger review bypass the debounce but
+not the session cap. Deterministic Tier-0 exits do not consume model cycles. A breach
+freezes risk-increasing entries, not exits or an entry that the exact scenario solve
+proves reduces the binding loss. It clears only below the 0.10%-of-equity hysteresis
+band.
+Profit targets, short-premium stops, and expiring-book final-session liquidation remain
+deterministic Tier-0 actions rather than reasons to wait for an LLM cycle.
+
+If a program stages an entry more than fifteen seconds after cycle start, the clean
+confirmation turn receives refreshed account state, raw positions, normalized
+portfolio, streamed spots and ATM IV. The canonical staged intent and thesis remain
+unchanged; the executor still re-prices and re-runs every hard gate at submission.
 
 ### News as a trigger
 
@@ -671,7 +787,7 @@ This is the **Featherless** role — high frequency, low cost, narrow classifica
 
 **The watch set derives from open theses.** Every thesis carries a news-shaped invalidation condition written by the agent when it opens the position, and the triage model evaluates headlines against those conditions. The agent therefore defines what news matters to it, and a static keyword file never has to be maintained.
 
-**What news is worth.** Index-moving headlines are priced within seconds, and a ten-minute debounce on 0–5 DTE structures will not beat the tape on a print. The value is defensive: knowing why a position is moving against its thesis, and reading a regime change early enough to exit. News remains a trigger into the normal decision cycle, and event volatility stays excluded as a strategy family.
+**What news is worth.** Index-moving headlines are priced within seconds, and even a five-minute model debounce on short-dated structures will not beat the tape on a print. The value is defensive: knowing why a position is moving against its thesis, and reading a regime change early enough to exit. News remains a trigger into the normal decision cycle; known scheduled events are labelled and halve ordinary new short-gamma sizing inside 90 minutes, while risk-reducing repairs remain available.
 
 ### Prompt composition
 
@@ -698,7 +814,8 @@ The pre-trade layer costs nothing on cycles that do not trade, which is most of 
      rules · quote validity before any decision uses a price
 3  Capability API
      every signature with argument and return types, grouped by layer,
-     including replay.window, learned.save, and the thesis functions
+     including directional context, candidate evaluation, risk, trading,
+     exit-policy and thesis functions
 4  The Structure type and the intent output schema
 5  The probability measure, stated once
 6  Worked examples
@@ -716,7 +833,9 @@ Nothing else varies. The bundle is the only thing between one cycle and the next
 
 The examples are the strongest available lever on program quality, and after the first call they cost nothing. They are chosen to demonstrate the behaviours instructions describe poorly:
 
-- A program that calls `replay.window` to test its own hypothesis against history, and abandons the idea when the measurement fails to support it.
+- A program that enumerates candidates, builds three probability measures, compares
+  alternatives with `vol.evaluate` and `vol.rank`, checks market direction and
+  abandons the idea when the measurements do not support it.
 - A program that opens a thesis with explicit price, time, and news invalidation conditions before calling `trading.execute`.
 - A program that returns `none` with a stated reason, showing that declining to trade is a first-class result.
 
@@ -740,18 +859,22 @@ STRUCTURE
   4  every leg is a currently-listed contract, verified this cycle.
   5  position intents correct on every leg; a wrong intent silently changes
      the structure into a different trade.
-  6  all legs share the underlying, and the expiry is inside the scored window.
+  6  all legs share the underlying; expiry is in the bounded eligible list, and
+     a post-window expiry was valued with the host-owned score horizon.
 
 EXITS
   7  long premium carries no drawdown stop. A stop there liquidates the
      convexity the premium was bought to own.
-  8  short premium carries a credit-multiple stop.
-  9  every position has a time stop tied to Thursday 16:00 ET.
+  8  short premium exits when close debit reaches 2x entry credit or loss reaches
+     50% of defined maximum loss, whichever comes first.
+  9  every position has an exact ET deadline plus a hard 15:45 ET expiry-day stop.
 
 STATE
  10  thesis recorded, with price, time, and news invalidation conditions.
  11  no duplicate or opposing exposure already open on this underlying.
  12  risk budget checked against realised losses, not only unrealised.
+ 13  same-cycle directional context exists for the exact underlying; candidate
+     alignment is named, and the requested risk satisfies the host cap.
 ```
 
 ### Prompt versioning
@@ -762,7 +885,7 @@ The preamble is a versioned artifact with its own hash, recorded in the trace al
 
 - **Serialized.** One cycle runs at a time. Triggers that fire during a cycle are coalesced and evaluated once it completes, so a volatile tape produces one considered decision rather than overlapping ones. Tier 0 continues throughout, so exits still fire while the model is thinking.
 - **Bounded.** A cycle has a wall-clock budget of 90 seconds and at most three analysis rounds. Exceeding either abandons the cycle, which is logged as a failure and leaves the book untouched.
-- **Closed outcome set.** Every cycle terminates in exactly one of `EXECUTED`, `NO_TRADE`, `BLOCKED_RISK`, `BLOCKED_LIQUIDITY`, `DEGRADED`, `ERROR`. The host validates the outcome against what actually happened and refuses `EXECUTED` when no order was acknowledged. Declining to trade is a first-class recorded result rather than something indistinguishable from a crash.
+- **Closed outcome set.** Every cycle terminates in exactly one of `EXECUTED`, `PROPOSED`, `NO_TRADE`, `BLOCKED_RISK`, `BLOCKED_LIQUIDITY`, `DEGRADED`, `ERROR`. The host validates the outcome against what actually happened and refuses `EXECUTED` when no order was acknowledged. `PROPOSED` is the dry-run terminal result; declining to trade is a first-class recorded result rather than something indistinguishable from a crash.
 - **Explicit intents.** An executing cycle returns intents of `open`, `close`, or `adjust`, each carrying a thesis and its exit conditions.
 - **In-window by default.** Candidate enumeration runs over the 132 streamed contracts, which are already the near-the-money short-dated structures the strategy wants. Reaching outside costs either a window re-centre or a REST burst, and the program states which it is doing.
 
@@ -777,7 +900,10 @@ The preamble is a versioned artifact with its own hash, recorded in the trace al
 Every position carries written exit conditions at entry. The policy differs by premium direction, and the difference is measured rather than assumed.
 
 - **Long premium (net debit).** Maximum loss is the premium paid and is bounded at entry. A mark-to-market drawdown stop liquidates exactly the convexity the premium was bought to own, protecting a left tail that is already capped. These carry a profit target, a thesis invalidation, and a time stop, and **no drawdown stop**.
-- **Short premium (net credit).** Loss is bounded by the spread width rather than by the credit received, so it can substantially exceed the premium taken in. These carry a stop at a multiple of the credit, alongside the profit target and time stop.
+- **Short premium (net credit).** Loss is bounded by the spread width rather than
+  by the credit received. The host exits when close debit reaches 2x entry credit
+  or unrealised loss reaches 50% of maximum loss, whichever comes first, alongside
+  the profit target and exact time stop.
 
 Risk on the long side is controlled by deployment rather than by stops. Total premium at risk is capped as a percentage of equity, and once cumulative **realised** losses pass a threshold the agent stops opening new positions without liquidating open ones.
 
@@ -785,9 +911,14 @@ Risk on the long side is controlled by deployment rather than by stops. Total pr
 
 This addresses the failure mode where a well-instrumented agent holds cash through the entire window, without the worse failure of executing negative-expectancy structures because a clock struck. Repeated `NO_TRADE` outcomes are visible in the trace and are themselves reviewable.
 
-### Adaptive thresholds
+### Adaptive exit thresholds
 
-After a cycle the model may propose revised trigger thresholds. The host validates them against fixed bounds before applying, so a threshold can be tuned but never set low enough to cause a storm. Revisions are recorded in the trace, which makes the loop's own adaptation visible alongside its trading.
+The model may set a durable profit target and trailing-profit policy for an open
+structure with `trading.set_exit_policy`. The host owns the watcher: it samples the
+immediately executable close value, arms a trail only after the configured gain,
+and submits the exit without waiting for another reasoning cycle when a target,
+trail, stop, time cutoff or forced-liquidation condition fires. Trigger cadence and
+hard risk bounds remain host configuration; generated code cannot rewrite them.
 
 ### Cost
 
@@ -804,14 +935,26 @@ Volatility premium defined-risk credit spreads, iron condors
 Relative value     substitute exposure across correlated underlyings
 ```
 
-Event volatility is excluded: Alpaca serves no earnings calendar and the scored window falls between reporting seasons. Undefined-risk premium selling is unavailable at level 3, so all premium selling is defined-risk.
+Single-name earnings-event trading is excluded: Alpaca serves no earnings calendar
+and the scored window falls between reporting seasons. Broad scheduled releases are
+different: their official ET timestamps are embedded in the observation bundle as
+advisory context, explicitly without consensus, outcome, direction, or a hard
+blackout. Undefined-risk premium selling is unavailable at level 3, so all premium
+selling is defined-risk.
+
+Candidate qualification and candidate selection are also distinct. Positive edge
+must be supported by at least two of the three real-world distributions. Among those
+qualified candidates, rank stability and the median selection score use expected
+profit divided by maximum loss and by `max(DTE, 1)`. This prevents a large credit or
+raw dollar payoff from winning merely because it consumes more loss capital, while
+preserving the per-distribution sign test as the evidence threshold.
 
 ---
 
 ## 11. Verification and safety
 
 ```text
-generated Python → capability stub → policy verifier → execution adapter → Alpaca MCP
+generated Python → capability stub → policy verifier → durable adapter → Alpaca CLI
 ```
 
 ### Risk parameters
@@ -831,6 +974,11 @@ SPREAD_PCT_CEILING               25.0   the allowance never rescues this far
 MIN_BID                           0.01  a zero bid means no exit exists
 MAX_QUOTE_AGE_S                  90.0   staleness budget
 MIN_RISK_REWARD                   0.25  max profit over max loss
+MAX_CORRELATED_SCENARIO_LOSS_PCT  1.50  worst executable one-day scenario, % equity
+SCENARIO_IV_SHOCK_PCT             20.0  unchanged and +20% IV grid
+SCENARIO_BREACH_HYSTERESIS_PCT     0.10  required headroom before breach clears
+ROBUST_EVIDENCE_RISK_PCT           3.0  all measures positive and stable-top
+PARTIAL_EVIDENCE_RISK_PCT          1.0  two positive measures, positive median
 PROFIT_TARGET_PCT                50.0   of max profit, both premium directions
 SHORT_PREMIUM_STOP_MULTIPLE       2.0   × credit received, short premium only
 ```
@@ -853,8 +1001,27 @@ Hard invariants, enforced in the host:
 - maximum spread as a fraction of mid, threshold calibrated from live session data
 - bounded maximum loss by the universal spread rule
 - buying-power check against Alpaca's own margin method
+- the model cannot self-certify evidence: exact same-cycle evaluation and ranking
+  earn either the robust ceiling, the partial ceiling, or zero
+- final quantity is the minimum of requested risk, evidence ceiling, position cap,
+  remaining portfolio premium risk, buying power, realised-loss headroom, and the
+  exact feasible quantity under correlated executable stress; all economics and
+  gates are recomputed at that quantity, and zero remains zero
+- SPY, QQQ and IWM share each −1/−0.5/0/+0.5/+1 expected-move shock; unchanged and
+  +20% IV are tested, observed per-leg half-spreads remain in liquidation values,
+  and missing scenario inputs fail closed
+- a breached book can admit only a candidate/quantity that repairs every binding
+  scenario; the solver handles both upper and lower integer bounds rather than
+  assuming quantity zero is feasible
 - portfolio risk budget and per-underlying concentration limits
 - correct multi-leg position intents
+- same-cycle directional context for the exact underlying, derived from labelled
+  1/5/15/30/60-minute quote-midpoint returns, normalized path movement,
+  session-range position, and SPY/QQQ/IWM confirmation; a direction-led candidate
+  conflicting with that observed path is refused, while neutral/insufficient
+  evidence is capped at 0.75% risk and aligned directional exposure at 3%; mixed
+  candidates use the same limits, while true volatility-led candidates use the
+  ensemble/scenario/cluster gates instead
 - **max profit strictly positive** — a net debit at or above the spread's own width is a guaranteed loss at every outcome
 - **max loss strictly positive** — a non-positive worst case implies risk-free arbitrage and is refused fail-closed
 - **risk/reward floor** — max profit over max loss above a stated minimum
@@ -934,7 +1101,11 @@ Implemented in `brain/shadow.py`. Fixed policies run inside the agent process, w
 | Shadow C | Fixed defined-risk credit spread |
 | Shadow D | Flat cash reference |
 
-Because paper fills price against live quotes, a shadow book marked at the quote closely approximates what the paper account would have recorded. The comparison covers one window and is reported as an observation.
+The shadow books use the same live quote stream but are accounting references, not
+broker portfolios. They cross quoted spreads mechanically and do not reproduce broker
+queue position, depth, partial fills, slippage beyond top of book or fees. The
+comparison therefore identifies broad opportunity cost; it is not a counterfactual
+claim that the shadow return was fully executable.
 
 **Each policy is run repeatedly across the window, not bought once on Monday.** A
 book holds at most one position, settles it at intrinsic value against the
@@ -944,19 +1115,46 @@ out of equity as though the premium had evaporated — including when it expired
 in the money. Without re-entry a "fixed bull call spread" baseline would measure one
 Monday trade rather than the strategy.
 
-### Shock simulation
+### Shock simulation and chronological calibration
 
-Explicitly encouraged by Alpaca as evidence of guardrails. The agent writes the scenario grid itself through a generated program — underlying ±1/2/5%, volatility ±20/50%, one session of decay — and the output goes in the repo and the write-up. Having the agent author its own stress test demonstrates the architecture better than shipping the function pre-built.
+Generated programs can still inspect `options.payoff` and the expected-move
+scenarios returned by `risk.direction`, but admission does not depend on model
+interpretation. `host/portfolio_risk.py` prices the existing book and candidate over
+the correlated grid at every stage and confirmation. Existing positions start from
+executable close, candidates from executable entry, and the current half-spread is
+retained in each scenario close.
 
-### Replay-backed falsification
+`scripts/portfolio_risk_replay.py` replays durable fills in chronological order and
+tests a threshold grid against the book that existed before each entry. Broker
+nested orders provide complete per-leg fill prices; underlying history supplies
+entry spot; per-leg IV is inverted from those transacted prices and sensitivity-
+checked against nearby option trade prints. Replay found 1.50% as a historical
+anchor: on the 0.05% grid it is the smallest value admitting the primary path's first
+standalone structure at its observed size (exact requirement 1.452%) and every
+holdout entry. The holdout never binds, and path-dependent later decisions are
+non-monotonic across nearby caps, so the number is not presented as a statistically
+stable optimum. The deployed 4.0% contest cap is deliberately more permissive and
+is labelled as a policy choice rather than a calibration result. P&L after the
+decision is deliberately absent from selection.
 
-`replay.window` is available to the agent during live decisions, so a hypothesis can be measured against history before it is traded. Historical option quotes do not exist, so replay models the spread with a stated haircut; the write-up names the limitation and reports the sensitivity.
+### Why a quote-perfect historical backtest is excluded
 
-### Adversarial review
+Alpaca provides historical option bars and trades but not time-ranged historical
+bid/ask quotes. The chronological replay is therefore exact in structure geometry,
+quantity, sequence, per-leg transacted price and underlying history, while its
+entry-time executable friction cannot be reconstructed exactly. This is sufficient
+to calibrate and sensitivity-check the admission gate; it is not presented as a
+quote-perfect strategy backtest. Live decisions continue to use fresh two-sided
+quotes and measured half-spreads.
 
-The specification was reviewed by a second model on 2026-08-29. Adopted from it: the objective rewritten so convexity is a candidate family rather than the default posture; the deployment floor reduced to a forced decision; the `TradeIntent` → `VerifiedTradeIntent` boundary; three probability measures in place of one; `oi_gamma` renamed from dealer gamma; provenance envelopes on replay; and `learned.save` constrained to pure analysis.
+### Data validation corrections
 
-Two of its factual corrections were tested and both held. Alpaca **does** serve Greeks and implied volatility on the indicative feed — measured present on 8 of 8 near-the-money contracts and absent on 3 of 3 zero-bid strikes. Our earlier finding of `None` came from a `snapshots` call limited to 50 results, which returns contracts in symbol order and landed entirely on unquotable far strikes: the same pagination trap this document warns about elsewhere. And the BLS Employment Situation is confirmed for 08:30 ET on Friday 4 September, which turns the Friday gap argument from precaution into fact.
+Alpaca **does** serve inputs sufficient to derive Greeks and implied volatility on
+the indicative feed. They were present on 8 of 8 measured near-the-money contracts
+and absent on 3 of 3 zero-bid strikes. An earlier `None` result came from a
+50-result snapshot page that landed on unquotable far strikes in symbol order. The
+runtime therefore selects the strike band first and makes missing or one-sided
+quotes explicit instead of treating pagination artifacts as market facts.
 
 ### Evidence ledger
 
@@ -1008,7 +1206,7 @@ Kimi sits directly behind Opus because it is the only fallback proven against th
 
 The last one is structural rather than cosmetic. `code` is checked with `ast.parse` before the completion is accepted, so a model that returns a description of a program instead of a program is treated as not having answered, rather than costing a sandbox round to discover.
 
-**A malformed reply earns a regeneration cycle before the chain gives up on it** — one attempt plus three typed repairs naming the specific fault, on the same model, exactly as in the bitgn agent. Measured: Kimi given a deliberately loose system prompt returned prose at `repairs=0` and a valid program once repairs were allowed. Every provider gets its own full budget; why the previous one failed says nothing about whether this one can be talked into compliance.
+**A malformed reply earns a regeneration cycle before the chain gives up on it** — one attempt plus three typed repairs naming the specific fault on the same model. Measured: Kimi given a deliberately loose system prompt returned prose at `repairs=0` and a valid program once repairs were allowed. Every provider gets its own full budget; why the previous one failed says nothing about whether this one can be talked into compliance.
 
 When the whole chain is exhausted the cycle terminates `ERROR` and the trace carries one record naming every model tried and why each failed, which renders in the panel's decision stream.
 
@@ -1079,7 +1277,9 @@ Running one architecture across providers produces a comparison of decision qual
 
 ## 14. Trace and write-up
 
-No user interface is required, so the deliverable is the repository, the trace, and the write-up.
+The deliverable remains the repository, trace, and write-up; the live panel is an
+operator and demonstration view over those same artifacts rather than a control
+plane.
 
 The trace is JSONL from the first line of code, rendered to a static HTML report at the end. Every generated program is stored verbatim and hashed, linked to the trigger that caused it and the orders it produced.
 
@@ -1088,12 +1288,17 @@ TRIGGER → PREFLIGHT → HYPOTHESIS → PROGRAM → EVIDENCE → CANDIDATES →
 ```
 
 A live read-only panel serves the same trace while the run is in progress: equity
-and P&L, the equity line, open positions, the shadow baselines ranked against the
-agent, model usage with cost, and the decision log grouped by cycle. It is a
-separate process that only reads the JSONL trace, so it cannot place, cancel, or
-influence a trade.
+and P&L, the equity line, normalized structures with broker and executable P&L,
+immediately sellable value and delegated exit target, shadow baselines, model usage,
+and the decision log grouped by cycle. It is a separate process that only reads run
+artifacts, so it cannot place, cancel, or influence a trade. Generated source is
+collapsed visually, while JSONL retains it verbatim; each evidence record keeps the
+last 16,000 stdout characters plus the complete capability-call list.
 
-The report shows the firing trigger, the preflight bundle and its hash, the generated program in full, the evidence it produced, competing candidates with normalized economics, the allocation decision, the PASS/FAIL gate, the Alpaca order ID and fill, and equity against the shadow baselines. The `learned/` diff shows which helpers the agent wrote for itself during the run.
+The report shows the firing trigger, the preflight bundle and its hash, the generated
+program in full, the evidence it produced, competing candidates with normalized
+economics, the allocation decision, the PASS/FAIL gate, the Alpaca order ID and
+fill, and equity against the shadow baselines.
 
 Verification renders as a checklist:
 
@@ -1145,7 +1350,7 @@ helper is a no-op when disabled, so telemetry can never break trading.
 
 ## 15. Build status
 
-Implemented and verified. **267 tests.**
+Implemented and verified. **414 tests.**
 
 | Component | Module | State |
 |---|---|---|
@@ -1156,15 +1361,18 @@ Implemented and verified. **267 tests.**
 | Realized vol with daily-bar fallback | `quant/vol.py` | done |
 | Three probability measures, rank stability | `quant/measures.py` | done |
 | Deterministic structure enumeration | `quant/candidates.py` | done |
-| REST client, two token buckets | `host/rest.py`, `host/limiter.py` | done |
+| Official CLI execution adapter, REST data client, two token buckets | `host/alpaca_cli.py`, `host/rest.py`, `host/limiter.py` | done |
 | Four websocket streams, health checks | `host/streams.py` | done — all four hold concurrently |
-| Rolling in-memory series | `host/series.py` | done |
+| Atomic rolling-series and runtime-state continuity | `host/series.py`, `host/runtime_state.py` | done |
 | Pure gate module | `host/gates.py` | done |
-| Two-phase executor, fill management | `host/execution.py` | done — **never met a live broker** |
+| Two-phase executor, durable submission and fill management | `host/execution.py`, `host/ledger.py` | done — live entries/exits reconcile; fault-injection recovery covered |
 | Thesis store | `host/thesis_store.py` | done |
 | JSONL trace | `host/trace.py` | done |
 | OpenTelemetry emission | `host/telemetry.py` | done — delivery confirmed |
-| Capability dispatch | `host/capabilities.py` | done |
+| Capability dispatch and directional-alignment evidence | `host/capabilities.py`, `host/series.py` | done |
+| Normalized portfolio, executable trajectories and adaptive exits | `host/portfolio.py`, `host/exit_policy.py` | done — restart durable |
+| Correlated executable stress and exact quantity solver | `host/portfolio_risk.py` | done — live admission and breach state |
+| Chronological fill replay and threshold calibration | `host/risk_replay.py`, `scripts/portfolio_risk_replay.py` | done — nested per-leg fills and trade-print sensitivity |
 | Sandbox, pipe RPC, repair hints | `sandbox/` | done |
 | Four-provider shim, contract parsing | `brain/providers.py` | done |
 | Three prompt layers, Anthropic cache blocks | `prompts/`, `brain/prompt.py` | done |
@@ -1172,18 +1380,19 @@ Implemented and verified. **267 tests.**
 | Tiered trigger loop, session state | `brain/loop.py` | done |
 | Shadow baselines | `brain/shadow.py` | done — four fixed policies, no orders |
 | Runner | `run.py` | done — soak tested |
-| Warm-up protocol | `scripts/warmup_check.py` | done — GO/NO-GO, 8 checks |
-| Spread and volatility calibration | `scripts/calibrate.py` | done |
+| Warm-up, fill-denomination and recovery protocols | `scripts/warmup_check.py`, `scripts/fill_probe.py`, `scripts/recovery_probe.py` | done — live fill quantity resolved as spreads |
+| Spread, volatility and portfolio-risk calibration | `scripts/calibrate.py`, `scripts/portfolio_risk_replay.py` | done |
 | Token and cost estimator | `scripts/estimate_cost.py` | done |
-| VPS deployment | `deploy/` | done — systemd, hardened, no listening port |
+| VPS deployment | `deploy/` | done — competition agent plus read-only panel on 3001 |
 
 ### Not built, deliberately
 
-- **Historical replay arena.** Alpaca serves no historical option quotes, so replay
-  would model the spread — meaning the fill and liquidity gates, the parts most
-  worth testing, would be assumptions. Cut in favour of live shadow baselines.
-- **`oi_gamma`.** Specified in §4, unimplemented. The signal is real but it was not
-  worth building ahead of the execution path.
+- **Quote-perfect historical strategy arena.** Alpaca serves no time-ranged
+  historical option quotes, so a full strategy backtest would invent the spread and
+  fill. The narrower chronological admission replay is built and explicitly labels
+  that limitation.
+- **`oi_gamma`.** Considered but excluded. Open interest does not reveal who owns
+  each side, so a dealer-position label would add an assumption to a short event.
 - **Featherless triage tier.** Wired in the provider chain, key not yet present;
   triage falls back to Nebius.
 - **Per-order corporate-action gate.** Checked and found not binding: no corporate
@@ -1252,49 +1461,71 @@ the days to expiry and passes that sigma explicitly.
 - Anthropic prompt caching engaged on the second run: 3,953 of ~4,600 input tokens
   read from cache.
 - Telemetry delivery confirmed by OTLP/HTTP `200 {"partialSuccess":{}}`.
-- The competition account has **zero orders of any kind, ever**.
+- Monday's live ledger contains acknowledged and reconciled competition entries and
+  an exit; fills arrived with parent `filled_qty` equal to submitted spread quantity.
 
-### The open assumption
+### The fill-denomination assumption is closed
 
-`ledger._signed_fill` treats a multi-leg order's `filled_qty` as a count of
-**spreads**. Every derived figure inherits it: realised P&L, realised losses, the
-deployment throttle, and the equity narrative in the write-up.
+`ledger._signed_fill` treats a multi-leg parent order's `filled_qty` as a count of
+spreads. Monday's durable records settled the question: submitted quantities 1, 2,
+4, 5 and 9 were reported back as the same filled quantities across verticals,
+condors, and the four-lot competition close—not multiplied by the number of legs.
+Realised P&L, the realised-loss throttle and structure quantities therefore use the
+correct denomination.
 
-If Alpaca instead reports aggregate **leg-contracts**, realised P&L is overstated by
-the sum of the leg ratios. On unit-ratio structures the 12% throttle would fire at
-6% on verticals and 3% on condors — the agent would stop entering far earlier than
-intended and the write-up would report P&L that never happened.
+`scripts/fill_probe.py` remains the isolated rehearsal reproduction if
+the API changes. It records parent and per-leg quantities plus the raw response and
+flattens in `finally`; it is no longer a prerequisite on every restart.
 
-This cannot be settled from documentation or from a cancelled order.
-`scripts/warmup_check.py --order` deliberately submits a non-marketable order, so it
-proves submit and cancel and nothing about fills. `scripts/fill_probe.py` exists
-solely to answer it: one marketable spread on the development account, the parent
-and per-leg quantities and the raw broker response recorded, then flattened from
-actual broker positions. Nonterminal entry and exit orders are cancelled in the
-cleanup path. It runs at 09:32 ET on Monday, before anything else trades.
+### What Monday's live session changed
 
-Until it has run, the assumption is documented rather than guessed at.
+The first live session verified equity and option streams, rolling intraday state,
+multi-leg entry fills, cancellation, a closing fill, restart recovery, executable
+portfolio marking, and the session gates. It also exposed a decision-quality gap:
+volatility models could favour a short-premium candidate while saying nothing about
+the direction embedded in its breakeven and delta. A bearish QQQ call-credit spread
+was opened with spot already slightly beyond its expiry breakeven and produced the
+largest realised loss of the session.
 
-### The risk that remains
+The repair is structural rather than a prompt slogan. The observation now carries
+labelled multi-horizon directional context; the exact candidate must pass same-cycle
+`market.directional_context` and `risk.direction` evidence; scenario P&L and book
+delta are explicit; and the host refuses a direction-led conflict. Shadow baseline
+returns remain evaluation evidence, not an input signal—the agent sees the price
+path that produced them rather than being told to chase whichever baseline is ahead.
 
-The system has never met a live tape. Friday 28 August closed before the build
-finished and the market is shut all weekend, so the first live market this code sees
-is the scored window itself. Specifically untested: an option quote arriving over
-the websocket, an order filling, the repricing ladder in `manage_fill`, and the
-rolling series producing an intraday realized-vol figure.
+The next repair closes the resulting-book gap. The host derives an evidence ceiling
+from the recorded three-measure evaluation, then stresses the complete correlated
+book with the candidate added and solves the exact feasible integer quantity. The
+replay-derived 1.50% anchor came from chronological broker fills, not Monday's
+subsequent P&L; deployment uses a separately labelled 4.0% contest ceiling.
+Confirmation repeats the calculation on fresh quotes and may only preserve, reduce,
+or block the reviewed size.
 
-`scripts/warmup_check.py` exists to compress that risk into 09:30–09:45 on Monday,
-on the development account, before entries open. It returns GO/NO-GO.
+The remaining uncertainty is ordinary strategy uncertainty: four sessions cannot
+establish that a directional classifier or a volatility family has durable edge.
+The trace therefore preserves the raw inputs, model disagreement, alignment label,
+decision and subsequent executable P&L for post-session attribution.
 
 ---
 
 ## 16. Build order
 
 **Saturday — host and capabilities**
-Sandbox with pipe RPC and policy verifier. Data plane: three stream subscriptions, rolling series, token-bucket limiter, session contract cache. Layer 1 primitives against MCP. Local Black-Scholes for IV and Greeks. `Structure` type and thesis store. Execution layer with fill management, deterministic `client_order_id`, and trade updates stream. `risk.max_loss` by the universal spread rule.
+Sandbox with pipe RPC and policy verifier. Data plane: four stream subscriptions,
+rolling series, token-bucket limiter, session contract cache. Read primitives against
+Alpaca's APIs and account/order execution through the official CLI. Local
+Black-Scholes for IV and Greeks. `Structure` type and thesis store. Execution layer
+with fill management, durable `PRE_SUBMIT`, deterministic `client_order_id`, and
+trade updates stream. `risk.max_loss` by the universal spread rule.
 
 **Sunday — decision system**
-`tradeable_chain`, `enumerate`, `evaluate`. Probability measure and calibration script. Tier 0 watcher, Tier 1 triggers, preflight collector. Decision program prompt and the three-round contract. `replay.window` and `learned/`. Shadow baselines. Trace logging. End-to-end dry run on the development account in `propose` mode, then one live round trip in `execute` mode.
+`tradeable_chain`, `enumerate`, `vol.evaluate`, `vol.rank`, directional context and
+alignment. Probability measures and calibration script. Tier 0 watcher, Tier 1
+triggers, preflight collector, adaptive exit policies, normalized portfolio, shadow
+baselines and trace logging. Decision program prompt and three-round contract.
+End-to-end dry run in `propose` mode, followed by the isolated live fill,
+cancellation, restart and close-path rehearsals.
 
 **Monday 09:30 ET — live on the competition account.** Warm-up until 09:45, first decision cycle at the anchor.
 
@@ -1311,27 +1542,28 @@ Sandbox with pipe RPC and policy verifier. Data plane: three stream subscription
 ## 17. Deployment
 
 The agent runs Monday 09:30 through Thursday 16:00 unattended, so it runs on a VPS
-rather than a laptop that can sleep or lose a network.
+rather than a laptop that can sleep or lose a network. The trading process listens
+on no port; its Alpaca, model-provider and telemetry connections are outbound. The
+read-only paper-demo panel is a separate systemd service.
 
-**It listens on no port.** Every connection is outbound: websockets to Alpaca, HTTPS
-to the model providers, gRPC to the OTel collector. No firewall rule is added and
-none is needed, which is a smaller surface than allocating one.
+| Role | Unit and directory | Configuration | Panel |
+|---|---|---|---|
+| judged competition account | `alpaca-agent.service`, `/opt/alpaca-agent` | competition, execute, 4% robust/scenario ceiling | `alpaca-panel.service`, TCP 3001 |
 
-| | |
-|---|---|
-| Unit | `alpaca-agent.service` |
-| User | dedicated `alpaca` system user, `nologin` |
-| Directory | `/opt/alpaca-agent`, mode 750, `.env` mode 640 |
-| Confinement | `ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges`, `PrivateTmp`, writes limited to the run directory |
-| Limits | 1 GB memory, 256 tasks, restart capped at 5 in 10 minutes so a crash loop cannot hammer Alpaca |
-| Co-tenants | `xray` (443), `mtproxy` (1443), and the existing `control.service` (3000) are untouched |
+The services use the dedicated `alpaca` system user with `nologin`. Confinement includes
+`ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges`, `PrivateTmp`, a 1 GB agent
+memory cap, and a restart limit of five in ten minutes. The panel has a 256 MB cap and
+reads artifacts only. UFW exposes 3001 for the hackathon paper demo; a non-demo
+deployment should bind loopback and use an authenticated proxy or SSH tunnel.
+
+Co-tenants `xray` (443), `mtproxy` (1443), and the existing `control.service` (3000)
+are untouched.
 
 Access is key-based. The deploy key is dedicated to this service rather than reused.
 
-**Exactly one agent may run anywhere.** Alpaca refuses a second stream connection
-per feed per account with 406 and the incumbent survives, so a second process
-against the same account fails quietly while appearing healthy. That is the failure
-mode most likely to cost a session, and `systemctl stop alpaca-agent` is the switch.
+**Exactly one agent may run.** Alpaca refuses a second stream connection for the
+same feed/account with 406 and the incumbent survives. Shadow baselines execute
+inside the process and never place broker orders.
 
 `deploy/README.md` carries the commands.
 
@@ -1361,6 +1593,11 @@ Social engagement is a scored criterion on the event page and carries two separa
 
 The project succeeds when:
 
-> An autonomous agent wrote and executed its own decision programs across four scored sessions, measured its own hypotheses against replayed history before trading them, extended its own capability API during the run, and passed every order through deterministic risk gates. Blocked orders, degraded-mode events, and shock scenarios are on record as evidence of the guardrails, and the decision trace reproduces end to end from real Alpaca order IDs and fills.
+> In the competition build, each order is backed by live quotes, three explicit
+> probability measures, directional and portfolio evidence, a recorded thesis and
+> deterministic risk gates. Durable submission and fill reconciliation survive
+> ambiguous responses and restarts; host-managed exits continue without waiting
+> for the model. The trace ties every decision to the generated program, capability
+> evidence, broker order, fill and subsequent executable P&L.
 
 If the adaptive agent trails its shadow baselines over the window, the write-up reports it. Four sessions is a small sample, and an honest negative result reads better than a defended one.

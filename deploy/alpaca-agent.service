@@ -3,6 +3,9 @@ Description=Alpaca options code agent
 Documentation=https://github.com/vetertann/alpaca-options-agent
 After=network-online.target
 Wants=network-online.target
+# A crash loop must not hammer Alpaca; give up after 5 restarts in 10 minutes.
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -12,14 +15,15 @@ WorkingDirectory=/opt/alpaca-agent
 EnvironmentFile=/opt/alpaca-agent/.env
 Environment=PYTHONPATH=/opt/alpaca-agent/src
 Environment=PYTHONUNBUFFERED=1
+Environment=ALPACA_CLI_PATH=/usr/local/bin/alpaca
+Environment=ALPACA_CONFIG_DIR=/opt/alpaca-agent/.run/cli-config
 ExecStart=/opt/alpaca-agent/.venv/bin/python -m agent.run \
-    --profile ${AGENT_PROFILE} --mode ${AGENT_MODE} --run-dir /opt/alpaca-agent/.run
+    --profile ${AGENT_PROFILE} --mode ${AGENT_MODE} \
+    --robust-risk-pct 0.04 --scenario-risk-pct 0.04 \
+    --run-dir /opt/alpaca-agent/.run
 
 Restart=always
 RestartSec=15
-# A crash loop must not hammer Alpaca; give up after 5 restarts in 10 minutes.
-StartLimitIntervalSec=600
-StartLimitBurst=5
 
 # The agent listens on nothing and writes only to its own run directory.
 NoNewPrivileges=true

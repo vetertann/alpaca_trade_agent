@@ -38,7 +38,7 @@ class Completion:
     error: str | None = None
 
 
-REPAIRS = 3          # one attempt plus three typed repairs, as in the bitgn agent
+REPAIRS = 3          # one attempt plus three typed repairs
 
 
 class ContractError(ValueError):

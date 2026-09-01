@@ -1,0 +1,44 @@
+[Unit]
+Description=Alpaca options code agent - balanced contest profile
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=alpaca
+Group=alpaca
+WorkingDirectory=/opt/alpaca-agent-dev
+EnvironmentFile=/opt/alpaca-agent-dev/.env
+Environment=PYTHONPATH=/opt/alpaca-agent-dev/src
+Environment=PYTHONUNBUFFERED=1
+Environment=ALPACA_CLI_PATH=/usr/local/bin/alpaca
+Environment=ALPACA_CONFIG_DIR=/opt/alpaca-agent-dev/.run/cli-config
+ExecStart=/opt/alpaca-agent-dev/.venv/bin/python -m agent.run \
+    --profile dev --mode execute \
+    --robust-risk-pct 0.04 \
+    --scenario-risk-pct 0.04 \
+    --run-dir /opt/alpaca-agent-dev/.run
+
+Restart=always
+RestartSec=15
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/alpaca-agent-dev/.run
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=1G
+TasksMax=256
+
+StandardOutput=append:/opt/alpaca-agent-dev/.run/agent.log
+StandardError=append:/opt/alpaca-agent-dev/.run/agent.err
+
+[Install]
+WantedBy=multi-user.target

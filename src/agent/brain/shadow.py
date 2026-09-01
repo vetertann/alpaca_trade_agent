@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,9 +42,9 @@ class ShadowPosition:
         return min(leg.expiry for leg in self.legs)
 
     def expired(self, when: dt.datetime) -> bool:
-        """Contracts stop existing. A held position that is not settled would drop
-        out of equity when its quotes disappear, as if the premium had vanished."""
-        return when.astimezone(ET).date() >= self.expiry
+        """Settle at the regular-session close, never at midnight on expiry day."""
+        close = dt.datetime.combine(self.expiry, dt.time(16, 0), tzinfo=ET)
+        return when.astimezone(ET) >= close
 
     def mark(self, quotes: dict[str, dict]) -> float | None:
         """Mark to market at the price it could be closed at right now."""
@@ -55,8 +56,9 @@ class ShadowPosition:
             bid, ask = float(q.get("bp", 0) or 0), float(q.get("ap", 0) or 0)
             if bid <= 0 or ask <= 0:
                 return None
-            # closing reverses the leg: a long leg is sold at the bid
-            total += -leg.sign * leg.ratio_qty * (bid if leg.sign > 0 else -ask)
+            # Value is expressed in the same debit-positive convention as entry:
+            # sell a long at bid (+), buy a short back at ask (-).
+            total += leg.sign * leg.ratio_qty * (bid if leg.sign > 0 else ask)
         return total
 
     def unrealised(self, quotes: dict[str, dict]) -> float | None:
@@ -65,13 +67,37 @@ class ShadowPosition:
             return None
         return (m - self.entry_price) * self.qty * CONTRACT_MULTIPLIER
 
-    def to_json(self) -> dict:
+    def to_json(self, *, durable: bool = False) -> dict:
+        legs = ([{"symbol": leg.symbol, "ratio_qty": leg.ratio_qty,
+                  "side": leg.side, "position_intent": leg.position_intent,
+                  "strike": leg.strike, "option_type": leg.option_type,
+                  "expiry": leg.expiry.isoformat()} for leg in self.legs]
+                if durable else [leg.symbol for leg in self.legs])
         return {"policy": self.policy, "opened_at": self.opened_at.isoformat(),
-                "qty": self.qty, "entry_price": round(self.entry_price, 3),
-                "max_loss": round(self.max_loss, 2), "thesis": self.thesis,
+                "qty": self.qty,
+                "entry_price": self.entry_price if durable else round(self.entry_price, 3),
+                "max_loss": self.max_loss if durable else round(self.max_loss, 2),
+                "thesis": self.thesis,
                 "closed_at": self.closed_at.isoformat() if self.closed_at else None,
                 "exit_price": self.exit_price,
-                "legs": [l.symbol for l in self.legs]}
+                "legs": legs}
+
+    @classmethod
+    def from_state(cls, raw: dict) -> "ShadowPosition":
+        legs = [Leg(symbol=str(leg["symbol"]), ratio_qty=int(leg["ratio_qty"]),
+                    side=leg["side"], position_intent=leg["position_intent"],
+                    strike=float(leg["strike"]), option_type=leg["option_type"],
+                    expiry=dt.date.fromisoformat(leg["expiry"]))
+                for leg in raw["legs"]]
+        return cls(policy=str(raw["policy"]),
+                   opened_at=dt.datetime.fromisoformat(raw["opened_at"]),
+                   legs=legs, qty=int(raw["qty"]),
+                   entry_price=float(raw["entry_price"]),
+                   max_loss=float(raw["max_loss"]), thesis=str(raw["thesis"]),
+                   closed_at=(dt.datetime.fromisoformat(raw["closed_at"])
+                              if raw.get("closed_at") else None),
+                   exit_price=(float(raw["exit_price"])
+                               if raw.get("exit_price") is not None else None))
 
 
 class ShadowBook:
@@ -130,6 +156,19 @@ class ShadowBook:
                 "open": sum(1 for p in self.positions if p.open),
                 "total": len(self.positions)}
 
+    def to_state(self) -> dict:
+        return {"policy": self.policy, "starting_equity": self.starting_equity,
+                "cash": self.cash, "realised": self.realised,
+                "positions": [p.to_json(durable=True) for p in self.positions]}
+
+    @classmethod
+    def from_state(cls, raw: dict) -> "ShadowBook":
+        book = cls(str(raw["policy"]), float(raw["starting_equity"]))
+        book.cash = float(raw["cash"])
+        book.realised = float(raw["realised"])
+        book.positions = [ShadowPosition.from_state(p) for p in raw["positions"]]
+        return book
+
 
 # ---------------------------------------------------------------- the policies
 
@@ -144,26 +183,46 @@ def _legs(rows: list[dict], sides: list[str]) -> list[Leg]:
             for r, s in zip(rows, sides)]
 
 
+def _expiry_groups(chain: list[dict]):
+    """Yield expiry-homogeneous chains, nearest first.
+
+    A spread assembled across expiries is a calendar, with completely different
+    risk from the fixed vertical/straddle policy being benchmarked.
+    """
+    expiries = sorted({str(row["expiry"]) for row in chain})
+    for expiry in expiries:
+        yield [row for row in chain if str(row["expiry"]) == expiry]
+
+
 def bull_call_spread(chain, spot, width=5.0):
-    lo, hi = _pick(chain, "call", spot), _pick(chain, "call", spot + width)
-    if not lo or not hi or lo["strike"] >= hi["strike"]:
-        return None
-    return _legs([lo, hi], ["buy", "sell"]), lo["ask"] - hi["bid"], "fixed bull call spread"
+    for expiry_chain in _expiry_groups(chain):
+        lo = _pick(expiry_chain, "call", spot)
+        hi = _pick(expiry_chain, "call", spot + width)
+        if lo and hi and lo["strike"] < hi["strike"]:
+            return (_legs([lo, hi], ["buy", "sell"]), lo["ask"] - hi["bid"],
+                    "fixed bull call spread")
+    return None
 
 
 def long_straddle(chain, spot, width=0.0):
-    c, p = _pick(chain, "call", spot), _pick(chain, "put", spot)
-    if not c or not p:
-        return None
-    return _legs([c, p], ["buy", "buy"]), c["ask"] + p["ask"], "fixed long straddle"
+    for expiry_chain in _expiry_groups(chain):
+        c = _pick(expiry_chain, "call", spot)
+        p = _pick(expiry_chain, "put", spot)
+        if c and p:
+            return (_legs([c, p], ["buy", "buy"]), c["ask"] + p["ask"],
+                    "fixed long straddle")
+    return None
 
 
 def credit_put_spread(chain, spot, width=5.0):
-    short, long = _pick(chain, "put", spot - width), _pick(chain, "put", spot - 2 * width)
-    if not short or not long or short["strike"] <= long["strike"]:
-        return None
-    return _legs([long, short], ["buy", "sell"]), long["ask"] - short["bid"], \
-        "fixed defined-risk credit put spread"
+    for expiry_chain in _expiry_groups(chain):
+        short = _pick(expiry_chain, "put", spot - width)
+        long = _pick(expiry_chain, "put", spot - 2 * width)
+        if short and long and short["strike"] > long["strike"]:
+            return (_legs([long, short], ["buy", "sell"]),
+                    long["ask"] - short["bid"],
+                    "fixed defined-risk credit put spread")
+    return None
 
 
 def flat_cash(chain, spot, width=0.0):
@@ -179,10 +238,43 @@ class ShadowRunner:
 
     def __init__(self, equity: float = 100_000.0, risk_budget: float = 3_000.0,
                  path: str | Path = ".run/shadow.jsonl"):
-        self.books = {name: ShadowBook(name, equity) for name in POLICIES}
         self.risk_budget = risk_budget
         self.path = Path(path)
+        self.state_path = self.path.with_suffix(".state.json")
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.epoch_started_at = dt.datetime.now(dt.timezone.utc)
+        self.books = {name: ShadowBook(name, equity) for name in POLICIES}
+        if self.state_path.exists():
+            self._restore()
+
+    def _restore(self) -> None:
+        raw = json.loads(self.state_path.read_text())
+        if raw.get("schema_version") != 1:
+            raise ValueError("unsupported shadow state schema")
+        restored = {name: ShadowBook.from_state(book)
+                    for name, book in (raw.get("books") or {}).items()}
+        if set(restored) != set(POLICIES):
+            raise ValueError("shadow state policy set is incomplete")
+        self.books = restored
+        self.epoch_started_at = dt.datetime.fromisoformat(raw["epoch_started_at"])
+
+    def _checkpoint(self) -> None:
+        payload = {"schema_version": 1,
+                   "epoch_started_at": self.epoch_started_at.isoformat(),
+                   "risk_budget": self.risk_budget,
+                   "books": {name: book.to_state()
+                             for name, book in self.books.items()}}
+        temp = self.state_path.with_name(f".{self.state_path.name}.tmp")
+        with temp.open("w") as fh:
+            json.dump(payload, fh, separators=(",", ":"))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp, self.state_path)
+        directory = os.open(self.state_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
     def step(self, chain: list[dict], spot: float, quotes: dict,
              when: dt.datetime, *, may_enter: bool) -> dict:
@@ -225,8 +317,12 @@ class ShadowRunner:
                 book.close_position(p, quotes, when)
 
     def record(self, quotes: dict, when: dt.datetime) -> dict:
-        row = {"ts": when.isoformat(),
+        self._checkpoint()
+        row = {"schema_version": 1, "ts": when.isoformat(),
+               "epoch_started_at": self.epoch_started_at.isoformat(),
                "books": {n: b.summary(quotes) for n, b in self.books.items()}}
         with self.path.open("a") as fh:
             fh.write(json.dumps(row) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
         return row

@@ -47,8 +47,8 @@ def test_debounce_blocks_rapid_cycles():
     ts = loop.TriggerState()
     ts.record_cycle(et(1, 12, 0), {"SPY": {"spot": 100.0, "iv_rv_ratio": 1.0}})
     uni = {"SPY": {"spot": 103.0, "iv_rv_ratio": 1.0}}
-    assert ts.evaluate(et(1, 12, 5), uni, [], {"SPY": 0.01}) is None    # within 10 min
-    t = ts.evaluate(et(1, 12, 11), uni, [], {"SPY": 0.01})
+    assert ts.evaluate(et(1, 12, 4), uni, [], {"SPY": 0.01}) is None
+    t = ts.evaluate(et(1, 12, 5), uni, [], {"SPY": 0.01})
     assert t and t.name == "underlying_move"
 
 
@@ -56,9 +56,13 @@ def test_move_trigger_needs_half_the_expected_daily_move():
     ts = loop.TriggerState()
     ts.record_cycle(et(1, 12, 0), {"SPY": {"spot": 100.0}})
     small = {"SPY": {"spot": 100.2}}
-    assert ts.evaluate(et(1, 12, 30), small, [], {"SPY": 0.01}) is None
+    assert ts.evaluate(
+        et(1, 12, 19), small, [], {"SPY": 0.01}, portfolio_risk_pct=0.04
+    ) is None
     big = {"SPY": {"spot": 100.8}}
-    assert ts.evaluate(et(1, 12, 30), big, [], {"SPY": 0.01}).name == "underlying_move"
+    assert ts.evaluate(
+        et(1, 12, 20), big, [], {"SPY": 0.01}, portfolio_risk_pct=0.04
+    ).name == "underlying_move"
 
 
 def test_volatility_shift_trigger():
@@ -69,6 +73,49 @@ def test_volatility_shift_trigger():
     assert t and t.name == "volatility_shift"
 
 
+def test_dynamic_build_gets_a_portfolio_review_every_twenty_minutes():
+    ts = loop.TriggerState()
+    ts.record_cycle(et(1, 12, 0), {"SPY": {"spot": 100.0}})
+    ts.last_anchor_fired = loop.ANCHORS[-1]
+
+    assert ts.evaluate(et(1, 12, 19), {"SPY": {"spot": 100.0}}, []) is None
+    trigger = ts.evaluate(et(1, 12, 20), {"SPY": {"spot": 100.0}}, [])
+
+    assert trigger and trigger.name == "portfolio_build_review"
+
+
+def test_portfolio_build_continues_after_the_first_position():
+    ts = loop.TriggerState()
+    ts.record_cycle(et(1, 12, 0), {"SPY": {"spot": 100.0}})
+    ts.last_anchor_fired = loop.ANCHORS[-1]
+
+    trigger = ts.evaluate(
+        et(1, 12, 31), {"SPY": {"spot": 100.0}}, [{"symbol": "SPY-option"}]
+    )
+
+    assert trigger and trigger.name == "portfolio_build_review"
+
+
+def test_portfolio_build_ignores_arbitrary_four_but_stops_at_capacity_or_risk():
+    ts = loop.TriggerState()
+    ts.record_cycle(et(1, 12, 0), {"SPY": {"spot": 100.0}})
+    ts.last_anchor_fired = loop.ANCHORS[-1]
+    universe = {"SPY": {"spot": 100.0}}
+
+    assert ts.evaluate(
+        et(1, 12, 21), universe, [], structure_count=4,
+        portfolio_risk_pct=0.02
+    ).name == "portfolio_build_review"
+    assert ts.evaluate(
+        et(1, 12, 21), universe, [], structure_count=8,
+        portfolio_risk_pct=0.02
+    ) is None
+    assert ts.evaluate(
+        et(1, 12, 21), universe, [], structure_count=1,
+        portfolio_risk_pct=0.04
+    ) is None
+
+
 def test_cycle_cap_stops_escalation():
     ts = loop.TriggerState()
     ts.cycles_this_session = loop.MAX_CYCLES_PER_SESSION
@@ -77,9 +124,61 @@ def test_cycle_cap_stops_escalation():
     assert ts.evaluate(et(1, 12, 30), {"SPY": {"spot": 110.0}}, [], {"SPY": 0.01}) is None
 
 
+def test_cycle_cap_also_stops_urgent_scenario_review_but_latches_breach():
+    ts = loop.TriggerState()
+    ts.cycles_this_session = loop.MAX_CYCLES_PER_SESSION
+    breached = {"portfolio_scenario_risk": {
+        "status": "ok", "breached": True, "loss_dollars": 1600,
+        "limit_dollars": 1500, "clear_below_dollars": 1400}}
+
+    assert ts.evaluate(
+        et(1, 12, 1), {}, [{}], portfolio_snapshot=breached) is None
+    assert ts.scenario_breach_latched
+
+
+def test_cycle_cap_also_stops_urgent_stop_review():
+    ts = loop.TriggerState()
+    ts.cycles_this_session = loop.MAX_CYCLES_PER_SESSION
+    ts.portfolio_baseline = {"structures": {
+        "sid-1": {"stop_progress": 0.40}}}
+    current = {"structures": [{
+        "structure_id": "sid-1", "stop_progress": 0.55}]}
+
+    assert ts.evaluate(
+        et(1, 12, 1), {}, [{}], portfolio_snapshot=current) is None
+
+
 def test_closed_session_never_triggers():
     ts = loop.TriggerState()
     assert ts.evaluate(et(1, 6, 0), {"SPY": {"spot": 100.0}}, []) is None
+
+
+def test_portfolio_scenario_first_crossing_bypasses_debounce_and_uses_hysteresis():
+    ts = loop.TriggerState()
+    ts.last_cycle_at = et(1, 12, 0)
+    ts.last_anchor_fired = loop.ANCHORS[-1]
+    breached = {"portfolio_scenario_risk": {
+        "status": "ok", "breached": True, "loss_dollars": 1600,
+        "limit_dollars": 1500, "clear_below_dollars": 1400}}
+
+    first = ts.evaluate(et(1, 12, 1), {}, [{}], portfolio_snapshot=breached)
+    assert first and first.name == "portfolio_scenario_breach"
+    assert first.exempt_from_debounce
+    assert ts.scenario_breach_latched
+    assert ts.evaluate(et(1, 12, 2), {}, [{}], portfolio_snapshot=breached) is None
+
+    cleared = {"portfolio_scenario_risk": {
+        "status": "ok", "breached": False, "loss_dollars": 1390,
+        "limit_dollars": 1500, "clear_below_dollars": 1400}}
+    assert ts.evaluate(et(1, 12, 3), {}, [{}], portfolio_snapshot=cleared) is None
+    assert not ts.scenario_breach_latched
+    assert ts.evaluate(et(1, 12, 4), {}, [{}],
+                       portfolio_snapshot=breached).name == "portfolio_scenario_breach"
+
+
+def test_scenario_breach_latch_survives_runtime_state_roundtrip():
+    ts = loop.TriggerState(scenario_breach_latched=True)
+    assert loop.TriggerState.from_json(ts.to_json()).scenario_breach_latched is True
 
 
 # --- exits -------------------------------------------------------------------
@@ -103,10 +202,46 @@ def test_short_premium_has_a_credit_multiple_stop():
     assert due and "short-premium stop" in why
 
 
+def test_short_premium_stop_is_reachable_on_a_high_credit_capped_spread():
+    pos = {"cost_basis": "-2532", "unrealized_pl": "-735",
+           "premium_at_risk": 1468, "qty": 4}
+    due, why = loop.position_exit_due(pos, {}, et(1, 12, 0), RP)
+    assert due and "$734 loss threshold" in why
+
+
+def test_thesis_time_stop_is_enforced_in_et():
+    pos = {"cost_basis": "1000", "unrealized_pl": "0"}
+    thesis = {"exit_at": "2026-09-01T15:30:00-04:00"}
+    assert not loop.position_exit_due(pos, thesis, et(1, 15, 29), RP)[0]
+    due, why = loop.position_exit_due(pos, thesis, et(1, 15, 30), RP)
+    assert due and "thesis time stop" in why
+
+
+def test_expiry_day_has_a_hard_stop_even_without_a_parseable_thesis():
+    pos = {"cost_basis": "1000", "unrealized_pl": "0", "legs": [
+        {"expiry": "2026-09-01"}, {"expiry": "2026-09-01"},
+    ]}
+    assert not loop.position_exit_due(pos, {"exit_time": "later"},
+                                      et(1, 15, 44), RP)[0]
+    due, why = loop.position_exit_due(pos, {"exit_time": "later"},
+                                      et(1, 15, 45), RP)
+    assert due and "expiry time stop" in why
+
+
 def test_final_session_time_stop():
     pos = {"cost_basis": "1000", "unrealized_pl": "0"}
     due, why = loop.position_exit_due(pos, {}, et(3, 15, 30), RP)
     assert due and "time stop" in why
+
+
+def test_later_dated_option_is_not_liquidated_just_to_turn_equity_into_cash():
+    pos = {"cost_basis": "1000", "unrealized_pl": "0", "legs": [
+        {"expiry": "2026-09-11"}, {"expiry": "2026-09-11"},
+    ]}
+
+    due, why = loop.position_exit_due(pos, {}, et(3, 15, 30), RP)
+
+    assert not due and why == ""
 
 
 # --- trading-day awareness ---------------------------------------------------

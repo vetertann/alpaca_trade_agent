@@ -104,6 +104,67 @@ def test_record_appends_a_row(tmp_path):
     assert len((tmp_path / "shadow.jsonl").read_text().strip().splitlines()) == 2
 
 
+def test_multi_expiry_chain_never_builds_a_calendar():
+    near = chain_exp(770.0, "2026-09-01")
+    far = chain_exp(770.0, "2026-09-03")
+    mixed = near + far
+    for name, policy in shadow.POLICIES.items():
+        built = policy(mixed, 770.0)
+        if name == "flat_cash":
+            assert built is None
+            continue
+        legs, _, _ = built
+        assert len({leg.expiry for leg in legs}) == 1, name
+
+
+def test_bull_call_opens_at_normal_risk_on_a_multi_expiry_chain(tmp_path):
+    ch = chain_exp(770.0, "2026-09-01") + chain_exp(770.0, "2026-09-03")
+    r = shadow.ShadowRunner(path=tmp_path / "shadow.jsonl")
+    r.step(ch, 770.0, quotes(ch), WHEN, may_enter=True)
+    pos = r.books["bull_call"].positions[0]
+    assert pos.qty >= 1
+    assert pos.max_loss <= r.risk_budget
+    assert len({leg.expiry for leg in pos.legs}) == 1
+
+
+def test_mark_uses_debit_positive_liquidation_values():
+    legs = [Leg("LONG", 1, "buy", "buy_to_open", 770, "call",
+                dt.date(2026, 9, 3)),
+            Leg("SHORT", 1, "sell", "sell_to_open", 775, "call",
+                dt.date(2026, 9, 3))]
+    pos = shadow.ShadowPosition("bull_call", WHEN, legs, 1, 2.0, 200, "test")
+    assert pos.mark({"LONG": {"bp": 4.0, "ap": 4.1},
+                     "SHORT": {"bp": 1.0, "ap": 1.1}}) == pytest.approx(2.9)
+
+
+def test_shadow_state_survives_restart_without_duplicate_entry(tmp_path):
+    path = tmp_path / "shadow.jsonl"
+    ch = chain_exp(770.0, "2026-09-03")
+    first = shadow.ShadowRunner(path=path)
+    first.step(ch, 770.0, quotes(ch), WHEN, may_enter=True)
+    first.record(quotes(ch), WHEN)
+
+    restarted = shadow.ShadowRunner(path=path)
+    original = first.books["bull_call"].positions[0]
+    restored = restarted.books["bull_call"].positions[0]
+    assert restored.legs == original.legs
+    assert restored.entry_price == original.entry_price
+    assert restarted.books["bull_call"].cash == first.books["bull_call"].cash
+    restarted.step(ch, 770.0, quotes(ch), WHEN, may_enter=True)
+    assert len(restarted.books["bull_call"].positions) == 1
+
+
+def test_zero_dte_position_remains_live_until_1600_et(tmp_path):
+    r = shadow.ShadowRunner(path=tmp_path / "shadow.jsonl")
+    ch = chain_exp(770.0, "2026-09-01")
+    before = dt.datetime(2026, 9, 1, 15, 59, tzinfo=shadow.ET)
+    close = dt.datetime(2026, 9, 1, 16, 0, tzinfo=shadow.ET)
+    r.step(ch, 770.0, quotes(ch), before, may_enter=True)
+    pos = r.books["bull_call"].positions[0]
+    assert not pos.expired(before)
+    assert pos.expired(close)
+
+
 # --- settlement and re-entry -------------------------------------------------
 
 def chain_exp(spot=770.0, expiry="2026-09-01"):

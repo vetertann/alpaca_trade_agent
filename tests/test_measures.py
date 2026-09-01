@@ -76,3 +76,31 @@ def test_rank_stability_detects_disagreement():
     out = ms.rank_stability(cands, m, lambda c: c["pay"], lambda c: c["px"], top_k=1)
     assert 0.0 <= out["stability"] <= 1.0
     assert set(out["ranks"]) == {"safe", "tail", "dud"}
+
+
+def test_evaluate_reports_capital_efficiency_per_day():
+    measures = [ms.Measure("certain", (100.0,))]
+    out = ms.evaluate(lambda _s: 120.0, measures, traded_price=100.0,
+                      max_loss=200.0, days=2.0)
+
+    assert out["expected_profit_by_measure"] == {"certain": 20.0}
+    assert out["risk_normalized_edge_by_measure"] == {"certain": 0.1}
+    assert out["capital_day_score_by_measure"] == {"certain": 0.05}
+    assert out["capital_day_score_median"] == 0.05
+
+
+def test_ranking_uses_expected_profit_per_max_loss_day():
+    measures = [ms.Measure("certain", (100.0,))]
+    candidates = [
+        {"id": "large_raw", "pay": lambda _s: 200.0, "px": 100.0,
+         "max_loss": 1000.0, "days": 2.0},
+        {"id": "capital_efficient", "pay": lambda _s: 140.0, "px": 100.0,
+         "max_loss": 100.0, "days": 1.0},
+    ]
+    out = ms.rank_stability(
+        candidates, measures, lambda c: c["pay"], lambda c: c["px"], top_k=1,
+        max_loss_of=lambda c: c["max_loss"], days_of=lambda c: c["days"])
+
+    assert out["basis"] == "expected_profit_per_max_loss_day"
+    assert out["stable_top"] == ["capital_efficient"]
+    assert out["score_median"]["capital_efficient"] == 0.4

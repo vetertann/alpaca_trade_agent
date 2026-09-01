@@ -45,6 +45,51 @@ def payoff_curve(legs, net_price: float, qty: int = 1, points: int = 0):
     return [(p, net_payoff_at(legs, p) * qty - cost) for p in grid]
 
 
+def breakevens(legs, net_price: float) -> list[float]:
+    """All non-negative expiry spots where one unit's P&L is zero.
+
+    Option payoffs are continuous and piecewise linear with slope changes only at
+    strikes.  Solving each interval exactly avoids a plotting grid (and therefore
+    avoids presenting an approximate breakeven to the decision model).
+    """
+    strikes = sorted({float(leg.strike) for leg in legs})
+    if not strikes:
+        return []
+
+    premium = float(net_price) * CONTRACT_MULTIPLIER
+
+    def pnl(spot: float) -> float:
+        return net_payoff_at(legs, spot) - premium
+
+    roots: list[float] = []
+    points = [0.0, *strikes]
+    for left, right in zip(points, points[1:]):
+        y_left, y_right = pnl(left), pnl(right)
+        if math.isclose(y_left, 0.0, abs_tol=1e-8):
+            roots.append(left)
+        if y_left * y_right < 0:
+            roots.append(left + (right - left) * (-y_left) / (y_right - y_left))
+    if math.isclose(pnl(points[-1]), 0.0, abs_tol=1e-8):
+        roots.append(points[-1])
+
+    # Above the highest strike only calls contribute slope.  Solve the open ray
+    # analytically so a large premium cannot put the root beyond an arbitrary grid.
+    high = strikes[-1]
+    right_slope = (sum(leg.sign * leg.ratio_qty for leg in legs
+                       if leg.option_type == "call") * CONTRACT_MULTIPLIER)
+    if not math.isclose(right_slope, 0.0, abs_tol=1e-12):
+        root = high - pnl(high) / right_slope
+        if root > high and not math.isclose(root, high, abs_tol=1e-8):
+            roots.append(root)
+
+    deduped: list[float] = []
+    for root in sorted(roots):
+        if root >= 0 and (not deduped or not math.isclose(
+                root, deduped[-1], rel_tol=0.0, abs_tol=1e-7)):
+            deduped.append(root)
+    return deduped
+
+
 def _pnl_extremes(legs, net_price: float, qty: int) -> tuple[float, float]:
     cost = net_price * qty * CONTRACT_MULTIPLIER
     vals = [net_payoff_at(legs, p) * qty - cost for p in _evaluation_points(legs)]

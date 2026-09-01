@@ -114,6 +114,36 @@ def enumerate_structures(chain: list[dict], spot: float, *, underlying: str = "S
         if "iron_condor" in families:
             out += _condors(near_c, near_p, spot, widths, underlying, expiry,
                             max_per_family)
+    rows_by_symbol = {row["symbol"]: row for row in chain}
+    for candidate in out:
+        deltas = [rows_by_symbol[leg.symbol].get("delta") for leg in candidate.legs]
+        net_delta = (sum(leg.sign * leg.ratio_qty * float(delta)
+                         for leg, delta in zip(candidate.legs, deltas))
+                     if all(delta is not None for delta in deltas) else None)
+        candidate.detail.update({
+            "spot_at_enumeration": round(float(spot), 4),
+            "breakevens": [round(x, 4) for x in st.breakevens(
+                candidate.legs, candidate.net_price)],
+            "pnl_if_expired_now": round(
+                st.net_payoff_at(candidate.legs, spot)
+                - candidate.net_price * CONTRACT_MULTIPLIER, 2),
+            "net_delta": None if net_delta is None else round(net_delta, 4),
+            "dollar_delta_per_1pct": (
+                None if net_delta is None else round(net_delta * spot, 2)),
+            # Host-only inputs for marking a post-window contract at the score
+            # horizon.  They are also included in the candidate JSON so the
+            # provenance is visible, but generated code never supplies them.
+            "leg_valuation_inputs": {
+                leg.symbol: {
+                    "iv": rows_by_symbol[leg.symbol].get("iv"),
+                    "mid": rows_by_symbol[leg.symbol].get("mid"),
+                    "half_spread": round(
+                        (float(rows_by_symbol[leg.symbol]["ask"])
+                         - float(rows_by_symbol[leg.symbol]["bid"])) / 2.0, 6),
+                }
+                for leg in candidate.legs
+            },
+        })
     return out
 
 
@@ -127,12 +157,12 @@ def _verticals(rows, kind, widths, underlying, expiry, cap) -> list[Candidate]:
                 continue
             # debit: long the lower strike (calls) or the higher strike (puts)
             long_row, short_row = (lo, hi) if kind == "call" else (hi, lo)
-            c = _build(f"{kind[0]}v_deb_{expiry}_{lo['strike']:.0f}_{w:.0f}",
+            c = _build(f"{underlying}:{kind[0]}v_deb_{expiry}_{lo['strike']:.0f}_{w:.0f}",
                        f"vertical_{kind}", underlying, [long_row, short_row],
                        ["buy", "sell"])
             if c:
                 out.append(c)
-            c = _build(f"{kind[0]}v_cred_{expiry}_{lo['strike']:.0f}_{w:.0f}",
+            c = _build(f"{underlying}:{kind[0]}v_cred_{expiry}_{lo['strike']:.0f}_{w:.0f}",
                        f"vertical_{kind}", underlying, [short_row, long_row],
                        ["buy", "sell"])
             if c:
@@ -150,7 +180,7 @@ def _straddles(calls, puts, spot, band, underlying, expiry) -> list[Candidate]:
         p = next((x for x in puts if x["strike"] == c["strike"]), None)
         if not p:
             continue
-        cand = _build(f"strad_{expiry}_{c['strike']:.0f}", "straddle", underlying,
+        cand = _build(f"{underlying}:strad_{expiry}_{c['strike']:.0f}", "straddle", underlying,
                       [c, p], ["buy", "buy"])
         if cand:
             out.append(cand)
@@ -162,7 +192,7 @@ def _strangles(calls, puts, spot, band, underlying, expiry) -> list[Candidate]:
     otm_c = [c for c in calls if band < c["strike"] - spot <= band * 3]
     otm_p = [p for p in puts if band < spot - p["strike"] <= band * 3]
     for c, p in itertools.product(otm_c[:6], otm_p[:6]):
-        cand = _build(f"strang_{expiry}_{p['strike']:.0f}_{c['strike']:.0f}",
+        cand = _build(f"{underlying}:strang_{expiry}_{p['strike']:.0f}_{c['strike']:.0f}",
                       "strangle", underlying, [c, p], ["buy", "buy"])
         if cand:
             out.append(cand)
@@ -181,7 +211,7 @@ def _condors(calls, puts, spot, widths, underlying, expiry, cap) -> list[Candida
             if not lc or not lp:
                 continue
             cand = _build(
-                f"ic_{expiry}_{sp['strike']:.0f}_{sc['strike']:.0f}_{w:.0f}",
+                f"{underlying}:ic_{expiry}_{sp['strike']:.0f}_{sc['strike']:.0f}_{w:.0f}",
                 "iron_condor", underlying, [lp, sp, sc, lc],
                 ["buy", "sell", "sell", "buy"])
             if cand:

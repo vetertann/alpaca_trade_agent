@@ -5,10 +5,11 @@ from agent.quant import structures as st
 EXP = "2026-09-03"
 
 
-def row(strike, kind, bid, ask):
+def row(strike, kind, bid, ask, delta=None):
     return {"symbol": f"SPY260903{kind[0].upper()}{strike*1000:08.0f}", "strike": float(strike),
             "option_type": kind, "expiry": EXP, "bid": bid, "ask": ask,
-            "mid": (bid + ask) / 2, "spread_pct": (ask - bid) / ((bid + ask) / 2) * 100}
+            "mid": (bid + ask) / 2, "spread_pct": (ask - bid) / ((bid + ask) / 2) * 100,
+            "delta": delta}
 
 
 def chain(spot=770.0, n=12, step=1.0):
@@ -82,5 +83,31 @@ def test_straddle_is_long_premium():
 def test_json_shape_is_model_ready():
     c = cd.enumerate_structures(chain(), 770.0, families=("vertical_call",))[0]
     j = c.to_json()
-    assert {"id", "family", "legs", "net_price", "max_loss", "risk_reward"} <= set(j)
+    assert {"id", "family", "legs", "net_price", "max_loss", "risk_reward",
+            "spot_at_enumeration", "breakevens", "pnl_if_expired_now",
+            "net_delta", "dollar_delta_per_1pct"} <= set(j)
     assert all({"symbol", "side", "position_intent", "strike"} <= set(l) for l in j["legs"])
+
+
+def test_candidate_aggregates_signed_leg_delta_host_side():
+    rows = chain()
+    for item in rows:
+        item["delta"] = (0.70 - (item["strike"] - 765.0) * 0.02
+                         if item["option_type"] == "call" else -0.45)
+    candidate = cd.enumerate_structures(
+        rows, 770.0, families=("vertical_call",), widths=(5,))[0]
+    by_symbol = {item["symbol"]: item for item in rows}
+    expected = sum(leg.sign * leg.ratio_qty * by_symbol[leg.symbol]["delta"]
+                   for leg in candidate.legs)
+    assert candidate.detail["net_delta"] == pytest.approx(expected)
+    assert candidate.detail["dollar_delta_per_1pct"] == pytest.approx(
+        round(expected * 770.0, 2))
+
+
+def test_candidate_ids_are_unique_across_underlyings():
+    spy = cd.enumerate_structures(chain(), 770.0, underlying="SPY",
+                                  families=("vertical_call",))[0]
+    qqq = cd.enumerate_structures(chain(), 770.0, underlying="QQQ",
+                                  families=("vertical_call",))[0]
+    assert spy.id.startswith("SPY:") and qqq.id.startswith("QQQ:")
+    assert spy.id != qqq.id

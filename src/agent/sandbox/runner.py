@@ -38,6 +38,8 @@ class RunResult:
     calls: list[dict] = field(default_factory=list)
     duration_s: float = 0.0
     timed_out: bool = False
+    state_manifest: dict = field(default_factory=lambda: {
+        "persisted": [], "dropped": [], "total_bytes": 0})
 
     @property
     def traceback(self) -> str:
@@ -47,7 +49,7 @@ class RunResult:
 HINTS = {
     "NameError": "The name is not defined. Capability namespaces available: "
                  "market, options, account, orders, vol, oi_gamma, risk, trading, "
-                 "thesis, replay, learned. Do not rebind them.",
+                 "thesis, decision, replay, learned. Do not rebind them.",
     "AttributeError": "That function does not exist on the namespace. Check the "
                       "capability list in the preamble rather than guessing.",
     "KeyError": "A key was missing from a result. Result shapes are exactly as "
@@ -79,11 +81,16 @@ class Sandbox:
         self.workdir = Path(workdir)
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.workdir / "sandbox_state.pkl"
+        self.manifest_path = self.workdir / "sandbox_state.pkl.manifest.json"
         self.calls: list[dict] = []
+        self.state_manifest: dict = {
+            "persisted": [], "dropped": [], "total_bytes": 0}
 
     def reset(self) -> None:
         self.state_path.unlink(missing_ok=True)
+        self.manifest_path.unlink(missing_ok=True)
         self.calls = []
+        self.state_manifest = {"persisted": [], "dropped": [], "total_bytes": 0}
 
     def _serve(self, sock: socket.socket, stop: threading.Event,
                otel_ctx=None) -> None:
@@ -176,5 +183,12 @@ class Sandbox:
             server.join(timeout=2)
             parent.close()
             child.close()
+        try:
+            loaded = json.loads(self.manifest_path.read_text())
+            if isinstance(loaded, dict):
+                self.state_manifest = loaded
+        except Exception:
+            pass
         return RunResult(ok, out, err, list(self.calls),
-                         round(time.monotonic() - t0, 2), timed_out)
+                         round(time.monotonic() - t0, 2), timed_out,
+                         dict(self.state_manifest))

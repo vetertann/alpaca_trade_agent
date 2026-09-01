@@ -22,6 +22,12 @@ DATA_URL = "https://data.alpaca.markets"
 WINDOW_OPEN = dt.datetime(2026, 8, 31, 9, 30, tzinfo=ET)
 WINDOW_CLOSE = dt.datetime(2026, 9, 3, 16, 0, tzinfo=ET)
 
+# Total equity, not realised cash, is scored at WINDOW_CLOSE.  Contract expiry is
+# therefore not an eligibility boundary: any active broker-listed option can
+# contribute marked value at the score horizon.  Liquidity, score-window
+# sensitivity and risk decide whether a tenor is useful; a calendar constant does
+# not.
+
 # A hand-edited .env should degrade to a warning, never to a silently missing provider.
 ALIASES: dict[str, tuple[str, ...]] = {
     "ALPACA_SECRET_KEY": ("SECRET", "ALPACA_SECRET"),

@@ -1,126 +1,57 @@
-# Monday runbook
+# Competition operations runbook
 
-Scored window opens **Monday 31 August, 09:30 ET**. Everything below is ordered by
-when it has to happen.
+Scored window: **Monday 31 August, 09:30 ET through Thursday 3 September, 16:00
+ET**. The first-session procedures are retained as evidence; the later sections are
+the current operating instructions.
 
-## Known risk: no rehearsal
+## Monday rehearsal status
 
-The system has never met a live tape. Every live check to date ran against Friday's
-closing quotes, which are stale by design and wider than intraday. Specifically
-untested until Monday:
+The first-session rehearsal and live session are complete. The system has now
+observed live equity and option quotes, populated and restored its rolling series,
+submitted and cancelled orders, filled multi-leg entries and an exit, reconciled
+those fills after restarts, and enforced the 15:45 ET entry cutoff.
 
-- an option quote arriving over the websocket
-- an order filling
-- the repricing ladder in `manage_fill`
-- the rolling series producing an intraday realized-vol figure
-- **whether multi-leg `filled_qty` counts spreads or leg-contracts**, which
-  `realised_pnl` assumes is spreads
+The fill-denomination question is resolved by the durable broker ledger: across
+live verticals and condors, parent `filled_qty` equalled the submitted spread
+quantity, including the four-lot exit. Realised P&L
+therefore correctly treats parent fill quantity as spreads, not aggregate leg
+contracts.
 
-The warm-up protocol below exists to compress that risk into the fifteen minutes
-before entries open, on the dev account.
+The procedures below remain the reproducible first-session protocol. Do not rerun a
+fill or recovery probe merely because the service restarted. Those scripts are
+historical rehearsal tools, not part of the production startup path; rerun one only
+when the relevant execution semantics changed.
 
 ## Before the open
 
 ```bash
 cd /Users/ivan/Documents/Hackatons/Alpaca
 set -a; . ./.env; set +a
-.venv/bin/python -m pytest tests/ -q          # expect 267 passed
+.venv/bin/python -m pytest tests/ -q          # expect 414 passed
+alpaca version                                # v0.0.14; /usr/local/bin/alpaca on VM
 ```
 
-Confirm the competition account is still untouched — this must read zero:
+Confirm account identity and current state. After Monday, orders and positions are
+expected; zero is no longer a valid success condition:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -c "
 from agent.config import load_env, profile; from agent.host.rest import Rest
-load_env(); r = Rest(profile('competition'))
+load_env(); r = Rest(profile('competition'), execution_transport='cli')
 a = r.account()
-print('equity', a['equity'], '| positions', len(r.positions()),
-      '| orders ever', len(r.orders('all')))"
+print('account', a['account_number'], '| equity', a['equity'],
+      '| positions', len(r.positions()), '| open orders', len(r.orders('open')))"
 ```
 
-## 09:30–09:45 ET — warm-up protocol
+## Completed execution protocol
 
-**This is the only live-market rehearsal we get.** Friday 28 August has closed, the
-market is shut all weekend, and the next open is Monday 09:30 — which is the scored
-window itself. Entries are blocked until 09:45, so the warm-up is the window for it.
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/warmup_check.py --order --seconds 45
-```
-
-Eight checks, four of which cannot pass without a live tape:
-
-| Check | Why it needs a live market |
-|---|---|
-| equity quotes flowing | connected is not delivering |
-| option quotes flowing | the indicative feed has never delivered a quote to us |
-| rolling series filling | the whole `diff` block and every threshold depends on it |
-| quote freshness | staleness budget is 90s; Saturday reads 80,598s |
-| validity gate accepts live quotes | on stale data it correctly rejects everything |
-| spreads inside the gate | closing spreads are wider than intraday |
-| **order round trip** | revalidates submit/cancel against the live order service |
-| no position left behind | proves cancel actually cancelled |
-
-`--order` stages a far out-of-the-money debit spread on the **dev** account, submits
-the same geometry at a deliberately non-marketable one-cent debit, checks it appears
-with our `client_order_id`, cancels it in a `finally` block, and confirms nothing is
-left. The competition account is never touched.
-
-The durable execution lifecycle is rehearsed locally before this live check:
-
-```bash
-.venv/bin/python -m pytest tests/test_rehearsal.py tests/test_ledger.py -q
-```
-
-That deterministic broker rehearsal covers partial fill, cancellation, process
-restart, realized-loss recovery, and forced final-session liquidation—states that
-cannot be reliably manufactured against the paper venue on demand.
-
-The closed-market control-plane rehearsal on 2026-08-29 was accepted by the dev
-paper account at a one-cent debit and then reached `canceled`; the postcondition was
-zero fills, zero open orders, and zero positions.
-
-It prints a GO/NO-GO. Do not start the competition agent on a NO-GO.
-
-Expect a partial pass at 09:30 and a full pass by 09:40 — the rolling series needs a
-few minutes of quotes before it has anything to report.
-
-## 09:32 ET — fill probe, before anything else trades
-
-The warm-up check submits a deliberately non-marketable order and cancels it, so it
-proves the submit and cancel path and nothing about fills. One question needs a real
-fill to answer:
-
-> Does Alpaca report multi-leg `filled_qty` in **spreads** or in **leg-contracts**?
-
-`ledger._signed_fill` assumes spreads. If it is aggregate leg-contracts, realised
-P&L is overstated by the sum of the leg ratios — doubled on a 1:1 vertical,
-quadrupled on a unit-ratio condor — and the 12% realised-loss throttle trips at a
-fraction of its intended threshold.
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/fill_probe.py --confirm
-```
-
-Development account only; it refuses the competition profile and refuses to run
-while the market is closed. It buys one 1-wide SPY call spread at a marketable
-limit, records the parent `qty`/`filled_qty`, every leg's `ratio_qty`/`qty`/
-`filled_qty`, and the complete raw broker response to `.run/fill_probe.json`, then
-flattens.
-
-It prints one of three verdicts:
-
-| Verdict | Meaning | Action |
-|---|---|---|
-| `spreads` | `filled_qty` equals the submitted qty | nothing to change |
-| `leg-contracts` | `filled_qty` equals qty × total leg ratio | derive completed structures as `min(leg filled_qty / ratio_qty)` before going live |
-| `unrecognised` | neither | read the raw response in `.run/fill_probe.json` and do not trade on the ledger's P&L until it is understood |
-
-The probe refuses a non-empty development order book, cancels nonterminal entry and
-exit orders, and derives cleanup quantity from the positions endpoint in a
-`finally` block. If anything remains, it says so explicitly — **flatten the
-development account by hand before continuing**, since a stray position there
-distorts every later reconciliation test.
+The live first-session checks are complete and must not be repeated on an ordinary
+restart. They established quote delivery, submit/cancel, multi-leg entry and exit
+fills, restart reconciliation, and parent fill denomination. Fault-injected tests
+cover timeout-after-accept, partial-fill cancellation, and exact retry after a
+confirmed absence. Treat these as recorded evidence, not recurring production
+startup actions; rerun a broker-mutating probe only after the relevant Alpaca
+semantics or execution code changes.
 
 ## 09:35 ET — calibrate, before the first entry
 
@@ -128,7 +59,7 @@ Closing quotes are systematically wider than intraday, so every parameter measur
 on Saturday is an upper bound.
 
 ```bash
-PYTHONPATH=src .venv/bin/python scripts/calibrate.py --profile dev --apply
+PYTHONPATH=src .venv/bin/python scripts/calibrate.py --profile competition --apply
 ```
 
 Read two things off it:
@@ -144,6 +75,13 @@ Read two things off it:
 
 Also check the zero-bid share. Saturday: SPY 7%, QQQ 2.5%, **IWM 18%**. If IWM is
 still that thin, leave it out of the traded set.
+
+The chronological fill replay found **1.50% of equity** as the smallest historical
+admission anchor, but the deployed four-session contest policy is deliberately
+**4.0%**. The larger number is a forward policy choice, not a backtest optimum: it
+lets qualified P&L matter while remaining far below the former 10% comparator. Do
+not change it intraday because the current book is breached or because a rejected
+trade later would have made money.
 
 ## 09:40 ET — dry run on the competition account
 
@@ -177,9 +115,15 @@ PYTHONPATH=src nohup .venv/bin/python -m agent.run \
 `--mode execute` submits orders. `--dev-models` is deliberately absent: the decision
 role runs on `claude-opus-5`.
 
-**Run it in exactly one place.** Alpaca refuses a second stream connection per feed
-per account with 406 and the incumbent wins, so a second process fails quietly while
-looking healthy. If the server agent is live, do not start a local one.
+The deployed topology is:
+
+| Account | Agent | Run directory | Panel |
+|---|---|---|---|
+| competition | `alpaca-agent.service` | `/opt/alpaca-agent/.run` | TCP 3001 |
+
+Run exactly one process for the account. Alpaca refuses a second connection to the
+same feed/account with 406 and the incumbent wins. Shadow baselines remain inside
+that process and do not place orders.
 
 ## Telemetry
 
@@ -232,8 +176,40 @@ PYTHONPATH=src .venv/bin/python scripts/panel.py --run-dir .run/live --port 3001
 ```
 
 Left column: equity, P&L against the $100,000 start, session state, cycle count, an
-equity line with the starting balance dotted across it, open positions, the shadow
-baselines ranked by return, and model usage with Anthropic cost.
+equity line with the starting balance dotted across it, normalized structures, the
+shadow baselines ranked by return, and model usage with Anthropic cost. In the
+portfolio table, `VALUE` is signed entry cash flow, `BROKER` is Alpaca's mark-based
+unrealized P&L, `SELL NOW` is P&L at immediately executable closing sides, and
+`AUTO EXIT` is the host-managed hard or adaptive profit threshold. These columns
+are deliberately different; a midpoint mark is not assumed sellable.
+
+The compact `TRACE PROOF` line is derived from the append-only trace: cycles,
+no-trades, unique submitted and filled orders, reconciliations, host-fired exits,
+current open executable P&L, and gate refusals grouped by reason. Its scope is the
+current trace file; it is evidence of the running system, not a reconstructed claim
+about records that are absent from that file.
+
+Active one-shot actions and their recent terminal outcomes appear as compact
+`HOST TRIGGER` rows below the portfolio, with the exact condition, labelled state,
+failed gates, last host observation and seconds remaining. `blocked_risk` means the
+price condition crossed but a durable risk gate failed admission; the authorization
+is terminal and does not retry every second. `waiting_data` instead means quote
+validity or spread quality was temporarily unusable: the rule stays active and the
+host retries after five seconds. No more than three blocked triggers per ET session
+grant an urgent reconsideration, and those reviews still consume the ordinary
+session cycle budget. A
+price-sensitive immediate order should show a fresh-price boundary in its trace;
+hard invalidation and time exits are intentionally unconditional. Trigger state is
+fsynced in `.run/action_triggers.jsonl`, survives restart, and expires explicitly.
+Removing a discretionary trigger cannot remove a mandatory exit or cancel a broker
+order that has already fired.
+
+The execution-control strip also shows correlated portfolio scenario loss against
+the 4.0% host cap. `RISK-REDUCING ENTRIES ONLY` means the live book is over that
+cap: exits remain enabled, ordinary entries are refused, and only an exact candidate
+quantity that repairs every binding scenario may stage. Do not clear state or raise
+the cap to remove this message; it clears automatically only after loss falls below
+the hysteresis floor.
 
 Right column: the decision log grouped by cycle — trigger, the agent's reasoning in
 full, collapsed machine output, and the outcome. It runs to the bottom of the
@@ -248,18 +224,32 @@ and opens again the next session — so `trades` should climb across the window.
 baseline stuck at one trade after Tuesday means settlement is not firing and the
 comparison is measuring a single Monday position.
 
-Read-only and separate from the agent, so it cannot affect a trade. On the server it
-binds loopback; reach it through an SSH tunnel rather than opening a port.
+Read-only and separate from the agent, so it cannot affect a trade. In the current
+paper-demo deployment the panel binds `0.0.0.0` on port 3001, and UFW permits that
+port. It is unauthenticated and must
+never expose credentials, raw environment values, or mutation endpoints; every
+`POST` returns 405. For a non-demo deployment, bind loopback and use an SSH tunnel.
 
 ## Through the week
 
 - Entries are blocked before 09:45 and after 15:45 ET, and outside the scored window.
-- Thursday winds down from **15:00 ET**, not 15:45. The book must reach final
-  posture by 16:00 Thursday.
-- Do not carry gap risk into Friday: the employment report lands 08:30 ET Friday,
-  an hour before a possible 09:30 snapshot.
+- Thursday winds down from **15:00 ET**, not 15:45. Expiring structures flatten;
+  later-dated contracts may remain when their marked exposure is the deliberate
+  final-equity posture. Confirm that every such candidate used `vol.measures_for`.
 - Post to X/LinkedIn daily tagging `@lablabai` and `@AlpacaHQ` — a scored criterion
   with two separate $500 prizes, and it costs minutes.
+- New entries require same-cycle `market.directional_context` and
+  `risk.direction` evidence for the exact candidate. A conflicted direction-led
+  structure is rejected; neutral or insufficient evidence is capped at 0.75% only
+  for direction-led or mixed structures. Genuinely volatility-led structures use
+  ensemble and resulting-book controls instead.
+- The model's requested risk is never authoritative. Three positive measures plus
+  stable rank earn 4%; three positive but unstable or two positive and stable earn
+  1.5%; two positive and unstable earn 0.5%; weaker evidence earns zero.
+- Every staged and confirmed entry must also keep the resulting correlated
+  SPY/QQQ/IWM book inside the 4.0% executable scenario-loss cap. Confirmation uses
+  fresh quotes and may preserve, reduce, or block the reviewed quantity, never
+  increase it.
 
 ## If something breaks
 
@@ -268,17 +258,23 @@ binds loopback; reach it through an SSH tunnel rather than opening a port.
 | `BLOCKED_LIQUIDITY` repeatedly | spread threshold too tight for live quotes | re-run `calibrate.py`, adjust `risk_params.py` |
 | `ERROR: output contract` | model replies malformed past the repair budget | check the provider is up; the chain falls back automatically |
 | stream `disconnected` | feed dropped | it reconnects with backoff; if persistent, restart the process |
+| `ENTRIES FROZEN` | an ambiguous submission is reconciling | leave the process running; exits remain enabled and successful reconciliation clears it automatically |
+| `ENTRIES LATCHED` | broker order semantics disagree with the durable request, or an unknown prefixed order exists | inspect the panel and broker order; do not clear the ledger or start another process |
+| `RISK-REDUCING ENTRIES ONLY` | current executable correlated stress exceeds 4.0% of equity | keep the service running; exits still work, an urgent review fires, and the restriction clears below the hysteresis floor |
+| `portfolio_scenario: incomplete` | a spot, leg quote, contract field, or implied volatility needed by stress is unavailable | do not treat it as zero; the entry gate fails closed until fresh complete inputs arrive |
 | `NO_TRADE` every cycle | gates are refusing, or the model is declining | read the `reason` in the trace — a declining model names the gate |
-| every cycle `EXECUTED` too fast | debounce or cycle cap misconfigured | 10-minute debounce, 20 cycles/session |
+| `needs_evidence: market.directional_context` | generated program omitted the exact-underlying direction read | allow the repair round; the host has not staged or submitted anything |
+| `needs_revision: direction-led candidate conflicts` | volatility edge and observed price direction disagree | choose an aligned/volatility-led structure or decline; do not bypass the gate |
+| every cycle `EXECUTED` too fast | debounce or cycle cap misconfigured | 5-minute debounce, 24 cycles/session |
 
 ## Account identifiers
 
 Alpaca names one account two ways, and only one of them appears in the dashboard:
 
-| Field | Example | Where you see it |
+| Field | Form | Where you see it |
 |---|---|---|
-| `account_number` | `PA3B52AVG2TD` | the Alpaca web dashboard |
-| `id` | a UUID | `/v2/account` only |
+| `account_number` | paper account number returned by Alpaca | the Alpaca web dashboard |
+| `id` | UUID returned by Alpaca | `/v2/account` only |
 
 Both come from the same `/v2/account` response and refer to the same account.
 `ALPACA_ACCOUNT_ID` accepts either.
@@ -291,7 +287,7 @@ real cost to guessing which one they meant.
 PYTHONPATH=src .venv/bin/python -c "
 from agent.config import load_env, profile
 from agent.host.rest import Rest
-load_env(); a = Rest(profile('competition')).account()
+load_env(); a = Rest(profile('competition'), execution_transport='cli').account()
 print('account_number:', a['account_number']); print('id:', a['id'])"
 ```
 

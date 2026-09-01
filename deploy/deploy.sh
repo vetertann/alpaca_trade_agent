@@ -24,7 +24,10 @@ rsync -az --delete -e "ssh -i $KEY -o StrictHostKeyChecking=accept-new" \
   --exclude '__pycache__' --exclude '*.pyc' \
   src/ "$HOST:$APP/src/"
 rsync -az -e "ssh -i $KEY -o StrictHostKeyChecking=accept-new" \
-  pyproject.toml scripts/ "$HOST:$APP/" 2>/dev/null || true
+  pyproject.toml "$HOST:$APP/"
+rsync -az --delete -e "ssh -i $KEY -o StrictHostKeyChecking=accept-new" \
+  --exclude '__pycache__' --exclude '*.pyc' \
+  scripts/ "$HOST:$APP/scripts/"
 
 echo "== dependencies =="
 $SSH "$APP/.venv/bin/pip install -q -r /dev/stdin" <<'REQ'
@@ -42,6 +45,23 @@ opentelemetry-api>=1.44
 opentelemetry-sdk>=1.44
 opentelemetry-exporter-otlp-proto-grpc>=1.44
 REQ
+
+echo "== official Alpaca CLI =="
+$SSH 'set -e
+CLI_VERSION=0.0.14
+CLI_ARCH=$(uname -m)
+case "$CLI_ARCH" in
+  x86_64) CLI_ASSET=cli_0.0.14_linux_amd64.tar.gz; CLI_SHA=6c82ef31f94dd61aae1c90e40fc41fdfaf8111bd50e9a2780b9d8d304eb2ba66 ;;
+  aarch64|arm64) CLI_ASSET=cli_0.0.14_linux_arm64.tar.gz; CLI_SHA=621270e2b935dbae587e6ae05fe04a10bc178b4c9c638961a3d0214568ff2617 ;;
+  *) echo "unsupported CLI architecture: $CLI_ARCH" >&2; exit 1 ;;
+esac
+CLI_TMP=$(mktemp -d)
+trap '\''rm -rf "$CLI_TMP"'\'' EXIT
+curl -fsSL "https://github.com/alpacahq/cli/releases/download/v${CLI_VERSION}/${CLI_ASSET}" -o "$CLI_TMP/$CLI_ASSET"
+printf "%s  %s\n" "$CLI_SHA" "$CLI_TMP/$CLI_ASSET" | sha256sum -c -
+tar -xzf "$CLI_TMP/$CLI_ASSET" -C "$CLI_TMP"
+install -m 0755 "$CLI_TMP/alpaca" /usr/local/bin/alpaca
+/usr/local/bin/alpaca version'
 
 echo "== service unit =="
 scp -q -i "$KEY" deploy/alpaca-agent.service "$HOST:/etc/systemd/system/alpaca-agent.service"

@@ -1,3 +1,7 @@
+import datetime as dt
+
+import pytest
+
 from agent.host.ledger import ExecutionLedger
 
 
@@ -25,11 +29,22 @@ def positions(qty):
     return [
         {"asset_class": "us_option", "symbol": LEGS[0]["symbol"],
          "qty": str(qty), "side": "long", "cost_basis": str(410 * qty),
-         "unrealized_pl": "20"},
+         "market_value": str(410 * qty + 20), "unrealized_pl": "20"},
         {"asset_class": "us_option", "symbol": LEGS[1]["symbol"],
          "qty": str(qty), "side": "short", "cost_basis": str(-140 * qty),
-         "unrealized_pl": "10"},
+         "market_value": str(-140 * qty + 10), "unrealized_pl": "10"},
     ]
+
+
+def prepare(ledger, coid="x-prepared", *, purpose="exit", limit=-2.0):
+    return ledger.prepare_submission(
+        client_order_id=coid,
+        request={"order_class": "mleg", "client_order_id": coid,
+                 "qty": "1", "type": "limit", "limit_price": str(limit),
+                 "time_in_force": "day", "legs": LEGS},
+        structure_id="spread-1", purpose=purpose, thesis_id="th_spy",
+        underlying="SPY", family="vertical_call", legs=LEGS, qty=1,
+        signed_limit_price=limit, max_loss_per_unit=270, cycle_id="cycle-1")
 
 
 def test_normalizes_legs_to_one_structure_and_derives_risk(tmp_path):
@@ -38,6 +53,7 @@ def test_normalizes_legs_to_one_structure_and_derives_risk(tmp_path):
     state = ledger.risk_snapshot(positions(2))
     assert len(state["structures"]) == 1
     assert state["structures"][0]["qty"] == 2
+    assert state["structures"][0]["market_value"] == 570.0
     assert state["premium_at_risk"] == 540.0
     assert state["realised_loss"] == 0.0
 
@@ -90,3 +106,69 @@ def test_fill_state_never_regresses_on_out_of_order_update(tmp_path):
     stale = ledger.record_state({"id": "entry", "status": "new", "filled_qty": "0"})
     assert stale["filled_qty"] == 1
     assert stale["filled_avg_price"] == 2.70
+
+
+def test_pre_submit_occupies_exit_action_before_broker_id_exists(tmp_path):
+    ledger = ExecutionLedger(tmp_path / "execution.jsonl")
+    prepared = prepare(ledger)
+    assert prepared["status"] == "pre_submit"
+    assert ledger.active_exit("spread-1")["client_order_id"] == "x-prepared"
+    assert ledger.active_exit("spread-1").get("order_id") is None
+
+    with pytest.raises(ValueError, match="already active"):
+        prepare(ledger, "x-repriced", limit=-1.95)
+
+
+def test_submitted_exit_freezes_new_entries_until_terminal(tmp_path):
+    ledger = ExecutionLedger(tmp_path / "execution.jsonl")
+    prepare(ledger)
+    ledger.record_execution_state("x-prepared", "submitted", order_id="exit-1")
+
+    assert ledger.entry_blockers()[0]["purpose"] == "exit"
+
+    ledger.record_execution_state("x-prepared", "rejected", order_id="exit-1")
+    assert ledger.entry_blockers() == []
+
+
+def test_mandatory_exit_intent_survives_cancel_and_restart(tmp_path):
+    path = tmp_path / "execution.jsonl"
+    ledger = ExecutionLedger(path)
+    intent = ledger.arm_exit_intent(
+        structure_id="spread-1", thesis_id="th_spy",
+        reason="scenario repair", source="portfolio_scenario_breach")
+    ledger.record_exit_intent_state(
+        "spread-1", "active", attempts=1, last_order_id="exit-1")
+
+    restarted = ExecutionLedger(path)
+    restored = restarted.active_exit_intents()[0]
+
+    assert restored["exit_intent_id"] == intent["exit_intent_id"]
+    assert restored["attempts"] == 1
+    assert restarted.entry_blockers()[0]["status"] == "mandatory_exit_pending"
+
+    restarted.record_exit_intent_state("spread-1", "filled_flat")
+    assert restarted.active_exit_intents() == []
+    assert restarted.entry_blockers() == []
+
+
+def test_fresh_404_stays_unknown_until_aged_requery(tmp_path):
+    ledger = ExecutionLedger(tmp_path / "execution.jsonl")
+    prepared = prepare(ledger)
+    created = dt.datetime.fromisoformat(prepared["ts"])
+
+    first = ledger.mark_lookup_404("x-prepared", now=created + dt.timedelta(seconds=1))
+    assert first["status"] == "unknown"
+    second = ledger.mark_lookup_404("x-prepared", now=created + dt.timedelta(seconds=16))
+    assert second["status"] == "not_found"
+    assert ledger.active_exit("spread-1") is None
+
+
+def test_lookup_transport_error_resets_consecutive_404_count(tmp_path):
+    ledger = ExecutionLedger(tmp_path / "execution.jsonl")
+    prepared = prepare(ledger)
+    created = dt.datetime.fromisoformat(prepared["ts"])
+    ledger.mark_lookup_404("x-prepared", now=created + dt.timedelta(seconds=16))
+    ledger.mark_lookup_error("x-prepared", "503", now=created + dt.timedelta(seconds=20))
+    state = ledger.mark_lookup_404("x-prepared", now=created + dt.timedelta(seconds=30))
+    assert state["status"] == "unknown"
+    assert state["consecutive_404"] == 1

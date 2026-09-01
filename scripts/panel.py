@@ -9,8 +9,10 @@ ever reads the JSONL trace it writes. It cannot place, cancel, or influence a tr
 from __future__ import annotations
 
 import argparse
+import collections
 import datetime as dt
 import json
+import re
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -57,8 +59,48 @@ def _shadow(run_dir: Path) -> list[dict]:
                 pass
     if not last:
         return []
-    rows = [{"policy": k, **v} for k, v in (last.get("books") or {}).items()]
+    epoch = last.get("epoch_started_at")
+    rows = [{"policy": k, **v, "benchmark": k == "flat_cash",
+             "epoch_started_at": epoch}
+            for k, v in (last.get("books") or {}).items()]
     return sorted(rows, key=lambda r: -r.get("return_pct", 0))
+
+
+def _number(value) -> str:
+    number = float(value)
+    return str(int(number)) if number.is_integer() else f"{number:g}"
+
+
+def _structure_label(position: dict) -> str:
+    """Human label for a normalized ledger structure, never a fake OCC symbol."""
+    if position.get("symbol"):
+        return str(position["symbol"])
+    legs = position.get("legs") or []
+    underlying = str(position.get("underlying") or "structure")
+    expiry = str(legs[0].get("expiry") or "") if legs else ""
+    puts = sorted(float(l["strike"]) for l in legs if l.get("option_type") == "put")
+    calls = sorted(float(l["strike"]) for l in legs if l.get("option_type") == "call")
+    pieces = []
+    if puts:
+        pieces.append("/".join(_number(s) for s in puts) + "P")
+    if calls:
+        pieces.append("/".join(_number(s) for s in calls) + "C")
+    strikes = "–".join(pieces)
+    suffix = f" · {expiry[5:]}" if len(expiry) >= 10 else ""
+    family = str(position.get("family") or "structure").replace("_", " ")
+    return f"{underlying} {strikes or family}{suffix}"
+
+
+def _portfolio_row(position: dict) -> dict:
+    row = dict(position)
+    row["symbol"] = _structure_label(position)
+    if row.get("market_value") is None:
+        # Alpaca defines unrealized P&L as market value minus cost basis. Old
+        # reconciliation records predate the aggregate market_value field, so the
+        # panel can still render them accurately immediately after deployment.
+        row["market_value"] = (float(row.get("cost_basis") or 0)
+                               + float(row.get("unrealized_pl") or 0))
+    return row
 
 
 def build_state(run_dir: Path) -> dict:
@@ -66,7 +108,13 @@ def build_state(run_dir: Path) -> dict:
     now = dt.datetime.now(ET)
 
     equity_series, positions, starting = [], [], 100_000.0
+    has_portfolio_marks = False
     cycles, model, profile, mode = set(), None, "?", "?"
+    robust_risk_pct = scenario_risk_pct = None
+    execution_control = {"entries_frozen": False, "latched": False, "blockers": []}
+    portfolio_scenario_risk = {}
+    action_triggers = []
+    latest_portfolio = {}
     log: list[dict] = []
     usage = {"input": 0, "output": 0, "cached": 0, "cache_write": 0,
              "reasoning": 0, "calls": 0, "cost_usd": 0.0, "priced_calls": 0,
@@ -81,17 +129,42 @@ def build_state(run_dir: Path) -> dict:
             model = r.get("model", model)
             profile = r.get("profile", profile)
             mode = r.get("mode", mode)
+            robust_risk_pct = r.get("robust_risk_pct", robust_risk_pct)
+            scenario_risk_pct = r.get("scenario_risk_pct", scenario_risk_pct)
+
+        elif kind == "NOTE" and r.get("message") == "execution_control":
+            execution_control = {
+                "entries_frozen": bool(r.get("entries_frozen")),
+                "latched": bool(r.get("latched")),
+                "blockers": r.get("blockers") or [],
+            }
 
         elif kind == "PREFLIGHT":
             b = r.get("bundle", {})
+            execution_control = b.get("execution_control") or execution_control
             eq = (b.get("account") or {}).get("equity")
+            starting = float((b.get("account") or {}).get("starting_equity") or starting)
             if eq:
                 equity_series.append({"t": r["ts"], "v": float(eq)})
             positions = b.get("book") or positions
 
         elif kind == "RECONCILE" and r.get("equity"):
             equity_series.append({"t": r["ts"], "v": float(r["equity"])})
-            positions = r.get("positions") or positions
+            if not has_portfolio_marks:
+                positions = r.get("positions") or positions
+
+        elif kind == "PORTFOLIO":
+            snapshot = r.get("snapshot") or {}
+            latest_portfolio = snapshot
+            action_triggers = snapshot.get("action_triggers") or []
+            portfolio_scenario_risk = (
+                snapshot.get("portfolio_scenario_risk") or portfolio_scenario_risk)
+            has_portfolio_marks = True
+            if snapshot.get("equity") is not None:
+                equity_series.append({"t": r["ts"], "v": float(snapshot["equity"])})
+            # Prefer normalized structures over raw broker legs. This also keeps
+            # the UI's labels and P&L aligned with what the agent can close.
+            positions = snapshot.get("structures") or positions
 
         elif kind == "TRIGGER":
             log.append({"cycle": r.get("cycle"), "ts": r["ts"], "kind": "TRIGGER",
@@ -170,6 +243,18 @@ def build_state(run_dir: Path) -> dict:
                         "text": "answered by " + str(r.get("answered_by")) + "\n"
                                 + "\n".join(r.get("skipped") or [])})
 
+        elif kind == "NOTE" and str(r.get("message") or "").startswith(
+                "action_trigger_"):
+            message = str(r.get("message")).removeprefix("action_trigger_")
+            failures = r.get("failed_gates") or []
+            detail = str(r.get("reason") or "")
+            if failures:
+                detail += (" · " if detail else "") + "failed gates: " + ", ".join(failures)
+            log.append({"cycle": r.get("cycle"), "ts": r["ts"],
+                        "kind": "TRIGGER_STATE",
+                        "text": f"{r.get('trigger_id')} {message}"
+                                + (f": {detail}" if detail else "")})
+
         elif kind == "ERROR":
             log.append({"cycle": r.get("cycle"), "ts": r["ts"], "kind": "ERROR",
                         "text": f"{r.get('where')}: {r.get('message','')}"})
@@ -193,11 +278,79 @@ def build_state(run_dir: Path) -> dict:
 
     cycles_out = [grouped[c] for c in reversed(order)][:12]
 
+    refusal_events: set[tuple[str, str]] = set()
+    submitted_ids: set[str] = set()
+    fill_ids: set[str] = set()
+    deterministic_exit_ids: set[str] = set()
+    no_trades = 0
+    incomplete_cycles = 0
+    reconciliations = 0
+    for record in recs:
+        kind = record.get("kind")
+        if kind == "OUTCOME" and str(record.get("outcome") or "").upper() == "NO_TRADE":
+            no_trades += 1
+        elif kind == "OUTCOME" and str(record.get("outcome") or "").upper() == "INCOMPLETE":
+            incomplete_cycles += 1
+        elif kind == "RECONCILE":
+            reconciliations += 1
+        elif kind == "VERIFICATION" and not record.get("passed", True):
+            names = re.findall(r"^FAIL\s+([^:]+):", str(record.get("checklist") or ""), re.M)
+            for name in names or ["verification"]:
+                refusal_events.add((str(record.get("cycle") or record.get("seq")),
+                                    name.strip()))
+        elif kind == "NOTE" and record.get("message") == "action_trigger_blocked":
+            for name in record.get("failed_gates") or ["action_trigger"]:
+                refusal_events.add((str(record.get("trigger_id") or record.get("seq")),
+                                    str(name)))
+        elif kind == "ORDER" and record.get("status") in (
+                "submitted", "submitted_close"):
+            oid = str(record.get("order_id") or record.get("client_order_id")
+                      or record.get("seq"))
+            submitted_ids.add(oid)
+            reason = str(record.get("reason") or "").lower()
+            if (record.get("status") == "submitted_close"
+                    and (str(record.get("execution_path") or "").startswith("host_")
+                         or reason.startswith("action trigger ")
+                         or "time stop" in reason
+                         or "profit target" in reason
+                         or reason.startswith("adaptive executable-profit"))):
+                deterministic_exit_ids.add(oid)
+        elif kind == "FILL" and float(record.get("delta_filled_qty") or 0) > 0:
+            fill_ids.add(str(record.get("order_id") or record.get("client_order_id")
+                             or record.get("seq")))
+
+    refusal_counts = collections.Counter(name for _, name in refusal_events)
+    proof = {
+        "scope": "current_trace_file",
+        "cycles": len(cycles),
+        "no_trades": no_trades,
+        "incomplete_cycles": incomplete_cycles,
+        "gate_refusals": len(refusal_events),
+        "gate_refusals_by_reason": dict(refusal_counts.most_common()),
+        # A positive fill is conclusive evidence that an order was submitted even
+        # when the submission predates the current process build and has no ORDER
+        # envelope in this trace.  Keep the proof monotonic across upgrades.
+        "submitted_orders": len(submitted_ids | fill_ids),
+        "submission_count_basis": "unique ORDER submissions or positive FILL evidence",
+        "filled_orders": len(fill_ids),
+        "reconciliations": reconciliations,
+        "deterministic_exits": len(deterministic_exit_ids),
+        "open_executable_pnl": latest_portfolio.get(
+            "total_executable_unrealized_pl"),
+    }
+
     equity = equity_series[-1]["v"] if equity_series else None
     return {"now": now.isoformat(), "profile": profile, "mode": mode, "model": model,
+            "robust_risk_pct": robust_risk_pct,
+            "scenario_risk_pct": scenario_risk_pct,
             "session": session_state(now), "cycles": len(cycles),
             "equity": equity, "starting": starting,
-            "equity_series": equity_series[-400:], "positions": positions,
+            "equity_series": equity_series[-400:],
+            "positions": [_portfolio_row(p) for p in positions],
+            "execution_control": execution_control,
+            "portfolio_scenario_risk": portfolio_scenario_risk,
+            "action_triggers": action_triggers,
+            "proof": proof,
             "usage": usage, "shadow": _shadow(run_dir), "cycle_log": cycles_out}
 
 

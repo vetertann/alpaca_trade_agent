@@ -196,9 +196,34 @@ def g_risk_budget(max_loss_dollars: float, equity: float, open_premium_at_risk: 
                       f"(single ${single_cap:,.0f}, total ${total_cap:,.0f})")
 
 
-def g_concentration(underlying: str, open_positions: list, params: RiskParams) -> GateResult:
+INDEX_CLUSTER = frozenset({"SPY", "QQQ", "IWM"})
+SHORT_GAMMA_FAMILIES = frozenset({
+    "iron_condor", "iron_butterfly", "vertical_call", "vertical_put",
+})
+
+
+def _short_gamma_position(position: dict) -> bool:
+    if str(position.get("family") or "") not in SHORT_GAMMA_FAMILIES:
+        return False
+    premium_type = position.get("premium_type")
+    if premium_type is not None:
+        return str(premium_type) == "short"
+    entry = position.get("entry_price_per_unit")
+    if entry is not None:
+        return float(entry) < 0
+    return float(position.get("entry_notional") or 0) < 0
+
+
+def g_concentration(underlying: str, open_positions: list, params: RiskParams,
+                    *, family: str | None = None,
+                    net_price: float | None = None,
+                    risk_reducing: bool = False) -> GateResult:
     n_total = len(open_positions)
     n_under = sum(1 for p in open_positions if p.get("underlying") == underlying)
+    if risk_reducing:
+        return GateResult(
+            "concentration", True,
+            "candidate mathematically repairs a breached correlated scenario book")
     if n_total >= params.max_concurrent_positions:
         return GateResult("concentration", False,
                           f"{n_total} open positions at the {params.max_concurrent_positions} cap")
@@ -206,6 +231,21 @@ def g_concentration(underlying: str, open_positions: list, params: RiskParams) -
         return GateResult("concentration", False,
                           f"{n_under} positions already in {underlying} "
                           f"(cap {params.max_positions_per_underlying})")
+    candidate_short_gamma = (
+        str(underlying).upper() in INDEX_CLUSTER
+        and str(family or "") in SHORT_GAMMA_FAMILIES
+        and net_price is not None and float(net_price) < 0)
+    cluster_short_gamma = sum(
+        1 for position in open_positions
+        if str(position.get("underlying") or "").upper() in INDEX_CLUSTER
+        and _short_gamma_position(position))
+    if (candidate_short_gamma
+            and cluster_short_gamma
+            >= params.max_correlated_index_short_gamma_positions):
+        return GateResult(
+            "concentration", False,
+            f"{cluster_short_gamma} correlated SPY/QQQ/IWM short-gamma structures "
+            f"already open (cap {params.max_correlated_index_short_gamma_positions})")
     return GateResult("concentration", True, f"{n_total} open, {n_under} in {underlying}")
 
 

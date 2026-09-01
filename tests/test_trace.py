@@ -22,11 +22,33 @@ def test_program_is_stored_verbatim_and_hashed(tmp_path):
     assert rec["code"] == code and len(rec["code_sha"]) == 16
 
 
+def test_evidence_keeps_the_latest_sixteen_thousand_characters(tmp_path):
+    t = Trace(tmp_path / "trace.jsonl")
+    t.start_cycle({}, "h")
+    output = "a" * 1000 + "b" * 16000
+    t.evidence(output, [], True, 0.1)
+    rec = [r for r in t.records() if r["kind"] == "EVIDENCE"][0]
+    assert rec["stdout"] == "b" * 16000
+
+
 def test_cycles_group(tmp_path):
     t = Trace(tmp_path / "trace.jsonl")
     a = t.start_cycle({}, "h"); t.outcome("NO_TRADE")
     b = t.start_cycle({}, "h"); t.outcome("EXECUTED")
     assert set(t.cycles()) == {a, b}
+
+
+def test_fill_strips_nested_jsonl_envelope_fields(tmp_path):
+    t = Trace(tmp_path / "trace.jsonl")
+    t.start_cycle({}, "h")
+
+    t.fill({"kind": "STATE", "ts": "broker-time", "cycle": "ledger-cycle",
+            "seq": 99, "order_id": "order-1", "filled_qty": 1})
+
+    record = t.records()[-1]
+    assert record["kind"] == "FILL"
+    assert record["cycle"].startswith("cy_")
+    assert record["order_id"] == "order-1"
 
 
 def test_survives_reload(tmp_path):

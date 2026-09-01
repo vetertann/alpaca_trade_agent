@@ -6,11 +6,14 @@ from dataclasses import dataclass, replace
 
 @dataclass(frozen=True)
 class RiskParams:
-    max_total_premium_at_risk_pct: float = 40.0
-    max_single_position_pct: float = 15.0
-    realised_loss_throttle_pct: float = 12.0
+    # Contest profile: enough headroom for P&L to matter, without turning one
+    # uncalibrated model decision into an account-level lottery ticket.
+    max_total_premium_at_risk_pct: float = 15.0
+    max_single_position_pct: float = 4.0
+    realised_loss_throttle_pct: float = 6.0
     max_concurrent_positions: int = 8
-    max_positions_per_underlying: int = 4
+    max_positions_per_underlying: int = 3
+    max_correlated_index_short_gamma_positions: int = 3
     # Calibrated from the at-the-money band, 2026-08-29 closing quotes -- an upper
     # bound, since closing spreads are wider than intraday. Re-run scripts/calibrate.py
     # after 09:35 ET on Monday before the first entry.
@@ -18,11 +21,24 @@ class RiskParams:
     max_spread_abs: float = 0.22            # allowance so cheap contracts are not
                                             # rejected on percentage arithmetic alone
     spread_pct_ceiling: float = 25.0        # the allowance never rescues this far
-    min_risk_reward: float = 0.25
+    min_risk_reward: float = 0.50
     profit_target_pct: float = 50.0
     short_premium_stop_multiple: float = 2.0
     min_bid: float = 0.01                   # a zero bid means no exit exists
     max_quote_age_s: float = 90.0
+
+    # Host-owned entry ceilings. Chronological Monday replay produced a lower
+    # historical anchor; 4% is the explicit balanced contest policy, not a fitted
+    # optimum. Generated programs cannot revise it.
+    max_correlated_scenario_loss_pct: float = 4.0
+    scenario_horizon_days: float = 1.0
+    scenario_iv_shock_pct: float = 20.0
+    scenario_breach_hysteresis_pct: float = 0.10
+    robust_evidence_risk_pct: float = 4.0
+    supported_evidence_risk_pct: float = 1.5
+    partial_evidence_risk_pct: float = 0.5
+    scheduled_event_window_minutes: float = 90.0
+    short_gamma_event_size_multiplier: float = 0.5
 
     # Bounds the host enforces on any revision the model proposes.
     BOUNDS = {

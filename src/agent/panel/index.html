@@ -3,11 +3,12 @@
 <style>
   :root {
     --bg:#0c0e11; --fg:#d6dae1; --dim:#6a7280; --dimmer:#3b4149;
-    --rule:#1c2026; --up:#7fb289; --down:#c08a86; --hl:#1a1f26;
+    --rule:#1c2026; --up:#7fb289; --down:#c08a86; --warn:#c8a45f; --hl:#1a1f26;
   }
   @media (prefers-color-scheme: light) {
     :root { --bg:#fbfbfa; --fg:#1a1d21; --dim:#8b9198; --dimmer:#c3c7cc;
-            --rule:#e6e7e9; --up:#3f7d4e; --down:#a4534d; --hl:#f2f2f0; }
+            --rule:#e6e7e9; --up:#3f7d4e; --down:#a4534d; --warn:#8b681e;
+            --hl:#f2f2f0; }
   }
   * { box-sizing:border-box; }
   body {
@@ -35,7 +36,13 @@
   th { color:var(--dim); font-size:10px; letter-spacing:.08em; text-transform:uppercase;
        padding-bottom:6px; }
   td.n, th.n { text-align:right; padding-right:0; }
-  .up { color:var(--up); } .down { color:var(--down); } .dim { color:var(--dim); }
+  .up { color:var(--up); } .down { color:var(--down); }
+  .warn { color:var(--warn); } .dim { color:var(--dim); }
+  .control { margin:0 0 22px; padding:8px 10px; border:1px solid var(--rule); }
+  .control.bad { border-color:var(--down); color:var(--down); }
+  .proof { color:var(--dim); font-size:10.5px; margin:-13px 0 20px;
+           line-height:1.7; overflow-wrap:anywhere; }
+  .proof b { color:var(--fg); font-weight:500; }
   .big { font-size:22px; letter-spacing:-.01em; white-space:nowrap; }
   .big .pct { font-size:12px; }
   .row { display:grid; grid-template-columns:repeat(4,auto); gap:0 26px;
@@ -77,6 +84,15 @@
   details > summary:before { content:"+ "; }
   details[open] > summary:before { content:"− "; }
   .empty { color:var(--dimmer); }
+  .portfolio-table { overflow-x:auto; }
+  #pos { table-layout:auto; font-size:11.5px; }
+  #pos th { font-size:8.5px; letter-spacing:.055em; padding:0 8px 5px 0; }
+  #pos td { padding:4px 8px 4px 0; border-bottom:1px solid var(--rule); }
+  #pos tr:last-child td { border-bottom:0; }
+  #pos th.n, #pos td.n { padding-right:8px; }
+  #pos th:last-child, #pos td:last-child { padding-right:0; }
+  #pos .pos-symbol { font-size:12px; }
+  #pos .pos-exit { color:var(--dim); }
   a { color:inherit; }
 </style>
 
@@ -84,6 +100,9 @@
 
 <div class="cols">
 <div class="left">
+
+<div class="control" id="control">execution control · entries enabled</div>
+<div class="proof" id="proof">trace proof · waiting for evidence</div>
 
 <section>
   <div class="row">
@@ -101,7 +120,12 @@
 
 <section>
   <div class="label">portfolio</div>
-  <table id="pos"><tbody><tr><td class="empty">no open positions</td></tr></tbody></table>
+  <div class="portfolio-table"><table id="pos"><tbody>
+    <tr><td class="empty">no open positions</td></tr>
+  </tbody></table></div>
+  <div class="portfolio-table" id="trigger-wrap" style="display:none;margin-top:8px">
+    <table id="action-triggers"><tbody></tbody></table>
+  </div>
 </section>
 
 <section>
@@ -159,13 +183,52 @@ function chart(pts, base) {
 function positions(rows) {
   const t = $("pos").querySelector("tbody");
   if (!rows.length) { t.innerHTML = '<tr><td class="empty">no open positions</td></tr>'; return; }
-  t.innerHTML = '<tr><th>symbol</th><th class="n">qty</th><th class="n">value</th>'
-              + '<th class="n">unrealised</th></tr>' + rows.map(p=>{
+  t.innerHTML = '<tr><th>structure</th><th class="n">qty</th><th class="n">value</th>'
+              + '<th class="n">broker</th><th class="n">sell now</th><th>auto exit</th></tr>'
+              + rows.map(p=>{
     const u = parseFloat(p.unrealized_pl||0);
-    return `<tr><td>${p.symbol}</td><td class="n">${p.qty}</td>`
+    const x = p.executable_unrealized_pl == null ? null : parseFloat(p.executable_unrealized_pl);
+    const ap = p.adaptive_exit_policy;
+    const exit = ap ? (ap.armed
+      ? `trail ${money(ap.current_trigger_profit)} · high ${money(ap.high_water_profit)}`
+      : `arm ${money(ap.activation_profit)} · back ${money(ap.max_profit_giveback)}`)
+      : `target ${money(p.profit_target||0)}`;
+    const broker = `${sign(u)}${money(Math.abs(u)).replace("−","")}`;
+    const executable = x==null ? '—' : `${sign(x)}${money(Math.abs(x)).replace("−","")}`;
+    return `<tr><td class="pos-symbol">${esc(p.symbol)}</td><td class="n">${p.qty}</td>`
          + `<td class="n">${money(parseFloat(p.market_value||0))}</td>`
-         + `<td class="n ${cls(u)}">${sign(u)}${money(Math.abs(u)).replace("−","")}</td></tr>`;
+         + `<td class="n ${cls(u)}">${broker}</td>`
+         + `<td class="n ${x==null?'':cls(x)}">${executable}</td>`
+         + `<td class="pos-exit">${exit}</td></tr>`;
   }).join("");
+}
+
+function actionTriggers(rows) {
+  const wrap = $("trigger-wrap"), body = $("action-triggers").querySelector("tbody");
+  if (!rows || !rows.length) { wrap.style.display="none"; body.innerHTML=""; return; }
+  wrap.style.display="block";
+  body.innerHTML = '<tr><th>host trigger</th><th>condition</th><th>state</th>'
+    + '<th class="n">last</th><th class="n">expires</th></tr>' + rows.map(r => {
+      const c = r.condition || {};
+      const label = r.purpose === "exit"
+        ? `close ${esc((r.structure_id||"").slice(0,8))}`
+        : `enter ${esc(((r.intent_summary||{}).underlying)||"")} ${esc(((r.intent_summary||{}).family)||"")}`;
+      const cond = c.kind === "max_entry_debit" ? `debit ≤ ${c.value}`
+        : c.kind === "min_entry_credit" ? `credit ≥ ${c.value}`
+        : `sell-now P&L ≥ ${money(c.value||0)}`;
+      const last = r.last_observed_value == null ? "—"
+        : (c.kind === "min_executable_profit" ? money(r.last_observed_value) : Number(r.last_observed_value).toFixed(2));
+      const state = r.status === "active"
+        ? (r.last_evaluation_status || "armed") : r.status;
+      const detail = r.last_gate_failures && r.last_gate_failures.length
+        ? ` · ${r.last_gate_failures.join(", ")}` : "";
+      const escalation = r.status === "blocked_risk"
+        ? (r.escalation_queued ? " · review queued" : " · review visible") : "";
+      const expiry = r.status === "active" ? `${Math.ceil(r.seconds_remaining||0)}s` : "done";
+      return `<tr><td>${label}</td><td class="dim">${cond}</td>`
+        + `<td class="${r.status==='blocked_risk'?'down':'dim'}">${esc(state)}${esc(detail)}${esc(escalation)}</td>`
+        + `<td class="n">${last}</td><td class="n dim">${expiry}</td></tr>`;
+    }).join("");
 }
 
 const esc = t => (t||"").replace(/[<&]/g, c => ({"<":"&lt;","&":"&amp;"}[c]));
@@ -225,13 +288,14 @@ function log(cycles) {
   el.innerHTML = cycles.map(c => {
     const out = c.outcome ? c.outcome.toLowerCase() : "";
     const bad = /error|blocked/.test(out);
+    const incomplete = /incomplete/.test(out);
     const body = c.events.map((e, i) => {
       texts[`${c.cycle}:${i}:${e.kind.toLowerCase()}`] = esc(e.text);
       return event(e, c.cycle, i);
     }).join("");
     return `<div class="cyc">
       <div class="hd">${clock(c.ts)}${c.trigger?` · ${esc(c.trigger)}`:""}${
-        out?` · <b class="${bad?"down":""}">${out}</b>`:""}</div>${body}</div>`;
+        out?` · <b class="${bad?"down":incomplete?"warn":""}">${out}</b>`:""}</div>${body}</div>`;
   }).join("");
   el.querySelectorAll("[data-type]").forEach(n => {
     const key = n.getAttribute("data-type");
@@ -247,14 +311,18 @@ function shadow(rows) {
     + '<th class="n">open</th><th class="n">trades</th></tr>'
     + rows.map(r => {
         const p = r.return_pct || 0;
-        return `<tr><td>${r.policy}</td>`
+        const label = esc(r.policy) + (r.benchmark ? ' <span class="dim">· benchmark</span>' : '');
+        return `<tr><td>${label}</td>`
           + `<td class="n ${cls(p)}">${sign(p)}${Math.abs(p).toFixed(2)}%</td>`
           + `<td class="n dim">${money(r.realised || 0)}</td>`
           + `<td class="n">${r.open ?? 0}</td>`
           + `<td class="n dim">${r.total ?? 0}</td></tr>`;
       }).join("")
     + '<tr><td colspan="5" class="dim" style="padding-top:6px;white-space:normal">'
-    + 'fixed policies on the same live quotes. no orders are placed.</td></tr>';
+    + 'fixed policies on the same live quotes. no orders are placed.'
+    + (rows[0].epoch_started_at
+       ? ` baseline epoch: ${esc(new Date(rows[0].epoch_started_at).toLocaleString())}.`
+       : '') + '</td></tr>';
 }
 
 function usage(u) {
@@ -279,11 +347,28 @@ function usage(u) {
          + `+Nc is cache reads. priced for anthropic only.</td></tr>` : "");
 }
 
+function proof(p) {
+  if (!p) { $("proof").textContent = "trace proof · unavailable"; return; }
+  const refuse = Object.entries(p.gate_refusals_by_reason||{})
+    .map(([name,count])=>`${name} ${count}`).join(", ") || "none";
+  const xp = p.open_executable_pnl == null ? "—" : money(p.open_executable_pnl);
+  $("proof").innerHTML = "trace proof · "
+    + `<b>${p.cycles||0}</b> cycles · <b>${p.no_trades||0}</b> no-trades · `
+    + `<b>${p.incomplete_cycles||0}</b> incomplete · `
+    + `<b>${p.submitted_orders||0}</b> submitted · <b>${p.filled_orders||0}</b> filled · `
+    + `<b>${p.reconciliations||0}</b> reconciliations · `
+    + `<b>${p.deterministic_exits||0}</b> host exits · `
+    + `open executable P&amp;L <b class="${cls(p.open_executable_pnl||0)}">${xp}</b> · `
+    + `gate refusals <b>${p.gate_refusals||0}</b> (${esc(refuse)})`;
+}
+
 async function tick() {
   try {
     const r = await fetch("/api/state", {cache:"no-store"});
     const s = await r.json();
-    $("hdr").textContent = `· ${s.profile}/${s.mode} · ${s.model||"—"} · ${clock(s.now)}`;
+    const risk = s.robust_risk_pct == null ? "" : ` · robust ${(100*s.robust_risk_pct).toFixed(0)}%`;
+    const scenario = s.scenario_risk_pct == null ? "" : ` · scenario ${(100*s.scenario_risk_pct).toFixed(1).replace(".0","")}%`;
+    $("hdr").textContent = `· ${s.profile}/${s.mode}${risk}${scenario} · ${s.model||"—"} · ${clock(s.now)}`;
     $("eq").textContent  = s.equity ? money(s.equity) : "—";
     const p = s.equity - s.starting;
     $("pnl").innerHTML = s.equity
@@ -292,8 +377,21 @@ async function tick() {
       : "—";
     $("ses").innerHTML = `<span class="${s.session==='ACTIVE'?'':'dim'}">${(s.session||"—").toLowerCase()}</span>`;
     $("cyc").textContent = s.cycles ?? "—";
+    const ctl = s.execution_control || {};
+    const blockers = ctl.blockers || [];
+    const sr = s.portfolio_scenario_risk || ctl.portfolio_scenario_risk || {};
+    const restricted = !!ctl.risk_reducing_only || sr.breached === true;
+    $("control").className = "control" + ((ctl.entries_frozen || restricted) ? " bad" : "");
+    $("control").textContent = ctl.entries_frozen
+      ? `execution control · ENTRIES FROZEN${ctl.latched?" (LATCHED)":""} · `
+        + blockers.map(b=>`${b.status}:${b.client_order_id||"unknown"}`).join(", ")
+      : restricted
+      ? `execution control · RISK-REDUCING ENTRIES ONLY · scenario loss ${money(sr.loss_dollars||0)} / ${money(sr.limit_dollars||0)} · exits enabled`
+      : "execution control · entries enabled · exits enabled";
     chart(s.equity_series||[], s.starting||100000);
     positions(s.positions||[]);
+    actionTriggers(s.action_triggers||[]);
+    proof(s.proof);
     log(s.cycle_log||[]);
     shadow(s.shadow);
     usage(s.usage);

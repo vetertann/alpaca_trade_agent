@@ -1,0 +1,35 @@
+[Unit]
+Description=Read-only Alpaca paper trading demo panel
+Documentation=https://github.com/vetertann/alpaca-options-agent
+After=network-online.target alpaca-agent.service
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=alpaca
+Group=alpaca
+WorkingDirectory=/opt/alpaca-agent
+Environment=PYTHONPATH=/opt/alpaca-agent/src
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/alpaca-agent/.venv/bin/python /opt/alpaca-agent/scripts/panel.py \
+    --run-dir /opt/alpaca-agent/.run --host 0.0.0.0 --port 3001
+
+Restart=always
+RestartSec=15
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

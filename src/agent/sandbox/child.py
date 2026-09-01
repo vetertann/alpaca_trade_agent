@@ -57,9 +57,11 @@ class _Namespace:
 
 
 PROGRAM_FILENAME = "<program>"
+MAX_VARIABLE_STATE_BYTES = 512 * 1024
+MAX_TOTAL_STATE_BYTES = 2 * 1024 * 1024
 
 NAMESPACES = ("market", "options", "account", "orders", "vol", "oi_gamma",
-              "risk", "trading", "thesis", "replay", "learned")
+              "risk", "trading", "thesis", "decision", "replay", "learned")
 
 
 def _restricted_imports(modules: dict[str, ModuleType]):
@@ -128,6 +130,70 @@ def _wrap(value):
     return value
 
 
+def _type_name(value) -> str:
+    cls = type(value)
+    return cls.__qualname__ if cls.__module__ == "builtins" else \
+        f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _atomic_write(path: str, payload: bytes) -> None:
+    temporary = f"{path}.tmp.{os.getpid()}"
+    with open(temporary, "wb") as fh:
+        fh.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(temporary, path)
+
+
+def _persist_state(g: dict, protected_names: set[str], state_path: str) -> dict:
+    """Persist each eligible variable independently and report the exact result.
+
+    A single unpickleable object must not erase a reusable intent or simulation
+    summary. The manifest is model-visible on the next round; it is therefore the
+    authority on which names exist, rather than an optimistic prompt promise.
+    """
+    import pickle
+
+    allowed = (int, float, str, bool, list, dict, tuple, type(None))
+    persisted: dict = {}
+    kept, dropped = [], []
+    total = 0
+    names = sorted(k for k in g if not k.startswith("_") and k not in protected_names)
+    for name in names:
+        value = g[name]
+        kind = _type_name(value)
+        if not isinstance(value, allowed):
+            dropped.append({"name": name, "type": kind,
+                            "reason": "top-level type is not persisted"})
+            continue
+        try:
+            blob = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception as exc:
+            dropped.append({"name": name, "type": kind,
+                            "reason": f"not serializable: {type(exc).__name__}"})
+            continue
+        size = len(blob)
+        if size > MAX_VARIABLE_STATE_BYTES:
+            dropped.append({"name": name, "type": kind,
+                            "reason": f"exceeds {MAX_VARIABLE_STATE_BYTES} byte limit"})
+            continue
+        if total + size > MAX_TOTAL_STATE_BYTES:
+            dropped.append({"name": name, "type": kind,
+                            "reason": f"state exceeds {MAX_TOTAL_STATE_BYTES} byte limit"})
+            continue
+        persisted[name] = value
+        total += size
+        kept.append({"name": name, "type": kind, "bytes": size})
+
+    state_blob = pickle.dumps(persisted, protocol=pickle.HIGHEST_PROTOCOL)
+    _atomic_write(state_path, state_blob)
+    manifest = {"persisted": kept, "dropped": dropped,
+                "total_bytes": len(state_blob)}
+    _atomic_write(state_path + ".manifest.json",
+                  json.dumps(manifest, sort_keys=True).encode())
+    return manifest
+
+
 def build_globals(obs: dict) -> dict:
     import builtins
     import datetime as _datetime
@@ -167,6 +233,7 @@ def build_globals(obs: dict) -> dict:
 def main() -> int:
     payload = json.loads(sys.stdin.read())
     g = build_globals(payload.get("obs", {}))
+    protected_names = set(g)
     state_path = payload.get("state_path")
     if state_path and os.path.exists(state_path):     # namespace persists across rounds
         try:
@@ -184,12 +251,7 @@ def main() -> int:
     finally:
         if state_path:
             try:
-                import pickle
-                keep = {k: v for k, v in g.items()
-                        if not k.startswith("_") and k not in ("obs", "RpcError")
-                        and isinstance(v, (int, float, str, bool, list, dict, tuple, type(None)))}
-                with open(state_path, "wb") as fh:
-                    pickle.dump(keep, fh)
+                _persist_state(g, protected_names, state_path)
             except Exception:
                 pass
     return 0

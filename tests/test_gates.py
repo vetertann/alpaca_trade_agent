@@ -115,7 +115,7 @@ def test_single_position_cap():
 
 
 def test_total_premium_cap():
-    r = gates.g_risk_budget(5_000, 100_000, 38_000, 0, RP)  # cap is 40%
+    r = gates.g_risk_budget(3_000, 100_000, 13_000, 0, RP)  # cap is 15%
     assert not r.passed and "at risk" in r.reason
 
 
@@ -126,9 +126,34 @@ def test_realised_loss_throttle_blocks_entry():
 
 
 def test_concentration_caps():
-    pos = [{"underlying": "SPY"}] * 4
+    pos = [{"underlying": "SPY"}] * 3
     assert not gates.g_concentration("SPY", pos, RP).passed
     assert gates.g_concentration("QQQ", pos, RP).passed
+
+
+def test_correlated_index_short_gamma_cluster_caps_without_blocking_long_gamma():
+    positions = [
+        {"underlying": symbol, "family": "iron_condor", "premium_type": "short"}
+        for symbol in ("SPY", "QQQ", "SPY")
+    ]
+    blocked = gates.g_concentration(
+        "QQQ", positions, RP, family="vertical_put", net_price=-1.0)
+    allowed = gates.g_concentration(
+        "QQQ", positions, RP, family="straddle", net_price=5.0)
+    assert not blocked.passed and "short-gamma" in blocked.reason
+    assert allowed.passed
+
+
+def test_mathematically_repairing_candidate_bypasses_count_caps():
+    positions = [{"underlying": "SPY", "family": "iron_condor",
+                  "premium_type": "short"} for _ in range(8)]
+
+    gate = gates.g_concentration(
+        "SPY", positions, RP, family="iron_condor", net_price=-1.0,
+        risk_reducing=True)
+
+    assert gate.passed
+    assert "repairs a breached" in gate.reason
 
 
 def test_render_shows_verdict():

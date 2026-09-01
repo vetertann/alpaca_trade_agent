@@ -23,6 +23,7 @@ echo "== directories =="
 mkdir -p "$APP"/{src,scripts,.run}
 chown -R "$USER:$USER" "$APP"
 chmod 750 "$APP"
+chmod 750 "$APP/.run"
 
 echo "== python env =="
 if [ ! -x "$APP/.venv/bin/python" ]; then

@@ -81,7 +81,8 @@ class GateResult:
 
 
 CycleOutcome = Literal[
-    "EXECUTED", "NO_TRADE", "BLOCKED_RISK", "BLOCKED_LIQUIDITY", "DEGRADED", "ERROR"
+    "EXECUTED", "PROPOSED", "NO_TRADE", "BLOCKED_RISK", "BLOCKED_LIQUIDITY",
+    "DEGRADED", "INCOMPLETE", "SUBMITTED", "ERROR"
 ]
 
 
@@ -99,6 +100,19 @@ class Thesis:
     gates: dict[str, str] = field(default_factory=dict)   # YES / NO / BLOCKED
     status: str = "open"
     notes: list[str] = field(default_factory=list)
+    # Host-normalized, timezone-aware form of ``exit_time``. Kept alongside the
+    # human explanation so old ledger rows remain readable while the deterministic
+    # exit watcher has a value it can enforce without interpreting prose.
+    exit_at: str = ""
+    # Added after the first live ledger rows existed.  The default keeps those
+    # rows readable; new theses persist the binding explicitly instead of relying
+    # only on the human-readable hypothesis or id prefix.
+    underlying: str = ""
+    # Canonical policy derived and bound by the host when an exact candidate first
+    # passes pre-submit validation.  Human prose remains useful explanation, but
+    # deterministic exits and later review never have to infer the enforceable
+    # policy from spelling or punctuation.
+    enforced_exit_policy: dict[str, object] = field(default_factory=dict)
 
     def to_json(self) -> dict:
         d = asdict(self)

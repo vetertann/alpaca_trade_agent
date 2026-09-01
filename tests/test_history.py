@@ -96,6 +96,29 @@ def test_bundle_without_history_is_still_valid(tmp_path):
     assert spy["realized_vol_by_window"] == {}
 
 
+def test_only_broker_backed_theses_enter_the_observation_bundle(tmp_path):
+    theses = store(tmp_path)
+    active = theses.open("real position", "SPY", exit_profit="p",
+                         exit_invalidation="i", exit_time="2026-09-03 15:45 ET")
+    stale = theses.open("canceled draft", "SPY", exit_profit="p",
+                        exit_invalidation="i", exit_time="2026-09-03 15:45 ET")
+    bundle = preflight.build(
+        FakeRest(), FakeSeries(), theses,
+        trigger={"name": "anchor"}, universe=["SPY"], expiries=["2026-09-03"],
+        account={"equity": "100000", "cash": "100000",
+                 "options_buying_power": "100000", "options_trading_level": 3},
+        active_thesis_ids={active.thesis_id})
+
+    assert [row["thesis_id"] for row in bundle["theses"]] == [active.thesis_id]
+    assert stale.thesis_id not in str(bundle)
+
+
+def test_preflight_uses_the_early_final_session_wind_down():
+    final_afternoon = dt.datetime(2026, 9, 3, 15, 1,
+                                  tzinfo=preflight.ET)
+    assert preflight._session_state(final_afternoon) == "WINDING_DOWN"
+
+
 def test_daily_windows_remain_available_when_intraday_stream_is_warm(tmp_path,
                                                                      monkeypatch):
     class DailyRest(FakeRest):
@@ -124,3 +147,23 @@ def test_daily_windows_remain_available_when_intraday_stream_is_warm(tmp_path,
     assert spy["realized_vol"] != spy["intraday_realized_vol"]
     assert spy["iv_rv_by_window"]["rv5"] == round(
         spy["iv_atm"] / spy["realized_vol_by_window"]["rv5"], 3)
+
+
+def test_bundle_exposes_two_expiry_iv_term_observables_without_a_gate(tmp_path,
+                                                                     monkeypatch):
+    def atm(_rest, _symbol, _spot, expiries, _now):
+        values = {"2026-09-01": 0.24, "2026-09-03": 0.20}
+        expiry = expiries[0]
+        return values[expiry], expiry
+
+    monkeypatch.setattr(preflight, "_atm_iv", atm)
+    b = preflight.build(
+        FakeRest(), FakeSeries(), store(tmp_path), trigger={"name": "anchor"},
+        universe=["SPY"], expiries=["2026-09-01", "2026-09-03"],
+        account={"equity": "100000", "cash": "100000",
+                 "options_buying_power": "100000", "options_trading_level": 3})
+    spy = b["universe"]["SPY"]
+    assert spy["front_iv"] == 0.24 and spy["next_iv"] == 0.20
+    assert spy["absolute_slope"] == 0.04
+    assert spy["relative_slope"] == 0.20
+    assert "event_blackout" not in spy

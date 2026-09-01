@@ -40,6 +40,7 @@ def test_credit_spread_loss_exceeds_credit():
     legs = [leg(770, "call", "sell"), leg(775, "call", "buy")]
     assert st.max_loss(legs, net_price=-1.50) == pytest.approx(350.0)
     assert st.max_profit(legs, net_price=-1.50) == pytest.approx(150.0)
+    assert st.breakevens(legs, net_price=-1.50) == pytest.approx([771.5])
 
 
 def test_iron_condor():
@@ -48,11 +49,18 @@ def test_iron_condor():
             leg(775, "call", "sell"), leg(780, "call", "buy")]
     assert st.max_loss(legs, net_price=-1.80) == pytest.approx(320.0)
     assert st.max_profit(legs, net_price=-1.80) == pytest.approx(180.0)
+    assert st.breakevens(legs, net_price=-1.80) == pytest.approx([763.2, 776.8])
 
 
 def test_long_straddle():
     legs = [leg(770, "call", "buy"), leg(770, "put", "buy")]
     assert st.max_loss(legs, net_price=8.00) == pytest.approx(800.0)
+    assert st.breakevens(legs, net_price=8.00) == pytest.approx([762.0, 778.0])
+
+
+def test_large_long_call_premium_finds_breakeven_beyond_plotting_range():
+    legs = [leg(100, "call", "buy")]
+    assert st.breakevens(legs, net_price=150.0) == pytest.approx([250.0])
 
 
 def test_quantity_scales_risk():

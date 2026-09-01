@@ -7,6 +7,8 @@ def dispatch(ns, fn, args, kwargs):
         return [{"c": 100.0}, {"c": 101.0}]
     if ns == "risk" and fn == "max_loss":
         return 265.0
+    if ns == "decision" and fn == "no_trade":
+        return {"status": "no_trade", "reason": args[0]}
     if ns == "trading" and fn == "execute":
         raise PermissionError("gate refused: zero bid on leg 2")
     raise AttributeError(f"{ns}.{fn} does not exist")
@@ -37,6 +39,13 @@ def test_dependent_calls_in_one_program(sb):
     r = sb.run(code, {})
     assert r.ok and r.stdout.strip() == "265"
     assert len(r.calls) == 2
+
+
+def test_decision_namespace_can_submit_a_no_trade_result(sb):
+    r = sb.run("result = decision.no_trade('simulation rejected')\nprint(result)", {})
+    assert r.ok, r.stderr
+    assert "'status': 'no_trade'" in r.stdout
+    assert {"ns": "decision", "fn": "no_trade"}.items() <= r.calls[0].items()
 
 
 def test_host_refusal_surfaces_as_error(sb):
@@ -97,14 +106,52 @@ def test_timeout_is_enforced(tmp_path):
 
 
 def test_namespace_persists_across_rounds(sb):
-    assert sb.run("computed = 42", {}).ok
+    first = sb.run("computed = 42", {})
+    assert first.ok
+    assert first.state_manifest["persisted"] == [
+        {"name": "computed", "type": "int", "bytes": 5}]
+    assert first.state_manifest["dropped"] == []
     r = sb.run("print(computed)", {})
     assert r.ok and r.stdout.strip() == "42"
+
+
+def test_unsupported_object_is_dropped_but_summary_survives(sb):
+    r = sb.run(
+        "import numpy as np\n"
+        "losses = np.array([0.1, 0.2, 0.3])\n"
+        "simulation_summary = {'tail_loss': float(losses.max())}", {})
+    assert r.ok, r.stderr
+    persisted = {item["name"]: item for item in r.state_manifest["persisted"]}
+    dropped = {item["name"]: item for item in r.state_manifest["dropped"]}
+    assert persisted["simulation_summary"]["type"] == "dict"
+    assert dropped["losses"] == {
+        "name": "losses", "type": "numpy.ndarray",
+        "reason": "top-level type is not persisted"}
+
+    follow_up = sb.run(
+        "print(simulation_summary['tail_loss'])\n"
+        "try:\n"
+        "    losses\n"
+        "except NameError:\n"
+        "    print('losses dropped')", {})
+    assert follow_up.ok, follow_up.stderr
+    assert follow_up.stdout.splitlines() == ["0.3", "losses dropped"]
+
+
+def test_one_unpickleable_value_does_not_poison_other_state(sb):
+    r = sb.run("good = 42\nbad = {'function': lambda x: x}", {})
+    assert r.ok, r.stderr
+    assert [item["name"] for item in r.state_manifest["persisted"]] == ["good"]
+    assert r.state_manifest["dropped"][0]["name"] == "bad"
+    assert "not serializable" in r.state_manifest["dropped"][0]["reason"]
+    follow_up = sb.run("print(good)", {})
+    assert follow_up.ok and follow_up.stdout.strip() == "42"
 
 
 def test_reset_clears_namespace(sb):
     sb.run("computed = 42", {})
     sb.reset()
+    assert sb.state_manifest == {"persisted": [], "dropped": [], "total_bytes": 0}
     r = sb.run("print(computed)", {})
     assert not r.ok and "NameError" in r.stderr
 

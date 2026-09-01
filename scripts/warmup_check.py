@@ -20,7 +20,7 @@ import uuid
 from agent.brain.loop import session_state
 from agent.config import ET, load_env, profile
 from agent.host import gates
-from agent.host.execution import Executor
+from agent.host.execution import Executor, canonical_broker_order, canonical_order_request
 from agent.host.rest import Rest
 from agent.host.risk_params import DEFAULT as RP
 from agent.host.series import RollingSeries
@@ -196,6 +196,14 @@ def order_round_trip(rest: Rest) -> None:
         check("order visible with our client_order_id",
               o.get("client_order_id") == coid,
               f"status={o.get('status')} legs={len(o.get('legs') or [])}")
+        by_client = rest.order_by_client_order_id(coid)
+        expected = canonical_order_request({
+            "order_class": "mleg", "qty": "1", "type": "limit",
+            "limit_price": "0.01", "time_in_force": "day",
+            "client_order_id": coid, "legs": api_legs})
+        check("lookup by client_order_id returns matching multi-leg semantics",
+              canonical_broker_order(by_client) == expected,
+              f"status={by_client.get('status')} legs={len(by_client.get('legs') or [])}")
     finally:
         if order_id:
             current = rest.order(order_id)
@@ -206,8 +214,28 @@ def order_round_trip(rest: Rest) -> None:
     check("order cancels cleanly",
           after.get("status") in ("canceled", "pending_cancel", "filled"),
           f"status={after.get('status')}")
+    terminal_by_client = rest.order_by_client_order_id(coid)
+    check("terminal order remains retrievable by client id",
+          terminal_by_client.get("id") == order_id,
+          f"status={terminal_by_client.get('status')}")
     check("no position left behind", not rest.positions(),
           f"{len(rest.positions())} positions on the dev account")
+
+
+def unknown_client_id_protocol(rest: Rest) -> None:
+    coid = "missing-probe-" + uuid.uuid4().hex[:20]
+    try:
+        value = rest.order_by_client_order_id(coid)
+    except Exception as exc:
+        status = Executor._http_status(exc)
+        response = getattr(exc, "response", None)
+        body = str(getattr(response, "text", "") or getattr(exc, "payload", ""))
+        check("unknown client_order_id is an explicit 404",
+              status == 404,
+              f"HTTP {status} body={body[:120]!r}")
+    else:
+        check("unknown client_order_id is an explicit 404", False,
+              f"unexpected success body={value!r}")
 
 
 def main() -> None:
@@ -219,9 +247,11 @@ def main() -> None:
 
     load_env()
     prof = profile("dev")
-    rest = Rest(prof)
+    # Use the same official-CLI account/order transport as the competition agent.
+    rest = Rest(prof, execution_transport="cli")
     now = dt.datetime.now(ET)
     clock = rest.clock()
+    unknown_client_id_protocol(rest)
 
     print(f"=== warm-up protocol  {now:%a %Y-%m-%d %H:%M:%S ET} ===")
     print(f"    market_open={clock.get('is_open')}  "

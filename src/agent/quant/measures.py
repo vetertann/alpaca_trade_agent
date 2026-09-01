@@ -117,45 +117,87 @@ def build(spot: float, sigma_annual: float, days: float,
     return out
 
 
-def evaluate(payoff_fn, measures: list[Measure], traded_price: float) -> dict:
+def evaluate(payoff_fn, measures: list[Measure], traded_price: float, *,
+             max_loss: float | None = None, days: float = 1.0) -> dict:
     """Edge under each measure, plus the agreement between them.
 
-    `payoff_fn(spot) -> dollars` at expiry. `traded_price` is what entering costs
-    at buy-the-ask and sell-the-bid.
+    `payoff_fn(spot) -> dollars` at the declared evaluation horizon. It may be
+    expiry payoff or a residual-time score mark. `traded_price` is what entering
+    costs at buy-the-ask and sell-the-bid.
     """
     per: dict[str, float] = {}
+    profits: dict[str, float] = {}
+    risk_normalized: dict[str, float] = {}
+    capital_day: dict[str, float] = {}
+    horizon = max(float(days), 1.0)
     for m in measures:
         ev = m.expected(payoff_fn)
-        per[m.name] = round((ev - traded_price) / abs(traded_price), 4) if traded_price else 0.0
+        profit = ev - traded_price
+        profits[m.name] = round(profit, 4)
+        per[m.name] = round(profit / abs(traded_price), 4) if traded_price else 0.0
+        if max_loss is not None and float(max_loss) > 0:
+            normalized = profit / float(max_loss)
+            risk_normalized[m.name] = round(normalized, 6)
+            capital_day[m.name] = round(normalized / horizon, 6)
     values = list(per.values())
     positive = sum(1 for v in values if v > 0)
-    return {
+    out = {
+        "expected_profit_by_measure": profits,
         "edge_by_measure": per,
         "edge_min": round(min(values), 4),
         "edge_median": round(stats.median(values), 4),
         "agreement": round(positive / len(values), 3),
         "survives_all": positive == len(values),
     }
+    if risk_normalized:
+        out.update({
+            "risk_normalized_edge_by_measure": risk_normalized,
+            "risk_normalized_edge_median": round(
+                stats.median(risk_normalized.values()), 6),
+            "capital_day_score_by_measure": capital_day,
+            "capital_day_score_median": round(
+                stats.median(capital_day.values()), 6),
+            "capital_day_score_basis": (
+                "expected profit / maximum loss / max(days_to_evaluation, 1)"),
+        })
+    return out
 
 
 def rank_stability(candidates: list[dict], measures: list[Measure],
-                   payoff_of, price_of, top_k: int = 3) -> dict:
+                   payoff_of, price_of, top_k: int = 3, *,
+                   max_loss_of=None, days_of=None) -> dict:
     """How much a ranking depends on which distribution produced it.
 
     A candidate attractive under only one convenient distribution is a modelling
     artifact, not edge.
     """
     ranks: dict[str, list[int]] = {}
+    scores: dict[str, list[float]] = {}
+
+    def score(candidate: dict, measure: Measure) -> float:
+        expected_profit = measure.expected(payoff_of(candidate)) - price_of(candidate)
+        if max_loss_of is None:
+            return expected_profit
+        max_loss = float(max_loss_of(candidate))
+        if max_loss <= 0:
+            return float("-inf")
+        days = max(float(days_of(candidate) if days_of else 1.0), 1.0)
+        return expected_profit / max_loss / days
+
     for m in measures:
-        scored = sorted(candidates,
-                        key=lambda c: m.expected(payoff_of(c)) - price_of(c),
-                        reverse=True)
+        measured = {c["id"]: score(c, m) for c in candidates}
+        scored = sorted(candidates, key=lambda c: measured[c["id"]], reverse=True)
         for pos, c in enumerate(scored):
             ranks.setdefault(c["id"], []).append(pos)
+            scores.setdefault(c["id"], []).append(measured[c["id"]])
     tops = [set(cid for cid, r in ranks.items() if r[i] < top_k)
             for i in range(len(measures))]
     common = set.intersection(*tops) if tops else set()
     union = set.union(*tops) if tops else set()
-    return {"ranks": ranks,
+    return {"basis": ("expected_profit_per_max_loss_day" if max_loss_of
+                       else "expected_profit_dollars"),
+            "ranks": ranks,
+            "score_median": {cid: round(stats.median(values), 6)
+                             for cid, values in scores.items()},
             "stable_top": sorted(common),
             "stability": round(len(common) / len(union), 3) if union else 0.0}
