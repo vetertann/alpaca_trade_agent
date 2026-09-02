@@ -1,5 +1,5 @@
 [Unit]
-Description=Alpaca options code agent - balanced contest profile
+Description=Alpaca options code agent - scaled balanced profile
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=600
@@ -17,8 +17,10 @@ Environment=ALPACA_CLI_PATH=/usr/local/bin/alpaca
 Environment=ALPACA_CONFIG_DIR=/opt/alpaca-agent-dev/.run/cli-config
 ExecStart=/opt/alpaca-agent-dev/.venv/bin/python -m agent.run \
     --profile dev --mode execute \
-    --robust-risk-pct 0.04 \
-    --scenario-risk-pct 0.04 \
+    --robust-risk-pct 0.10 --scenario-risk-pct 0.10 \
+    --single-position-risk-pct 0.10 --total-premium-risk-pct 0.30 \
+    --aligned-direction-risk-pct 0.10 --build-target-risk-pct 0.09 \
+    --sizing-posture scaled_balanced \
     --run-dir /opt/alpaca-agent-dev/.run
 
 Restart=always

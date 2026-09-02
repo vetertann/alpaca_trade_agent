@@ -19,10 +19,10 @@ Environment=ALPACA_CLI_PATH=/usr/local/bin/alpaca
 Environment=ALPACA_CONFIG_DIR=/opt/alpaca-agent/.run/cli-config
 ExecStart=/opt/alpaca-agent/.venv/bin/python -m agent.run \
     --profile ${AGENT_PROFILE} --mode ${AGENT_MODE} \
-    --robust-risk-pct 0.10 --scenario-risk-pct 0.10 \
-    --single-position-risk-pct 0.10 --total-premium-risk-pct 0.30 \
-    --realised-loss-throttle-pct 0.15 --aligned-direction-risk-pct 0.10 \
-    --build-target-risk-pct 0.09 --sizing-posture high_variance \
+    --robust-risk-pct 0.25 --scenario-risk-pct 0.25 \
+    --single-position-risk-pct 0.25 --total-premium-risk-pct 0.60 \
+    --realised-loss-throttle-pct 0.25 --aligned-direction-risk-pct 0.25 \
+    --build-target-risk-pct 0.20 --sizing-posture terminal_push \
     --run-dir /opt/alpaca-agent/.run
 
 Restart=always

@@ -29,6 +29,9 @@ from agent.types import (CONTRACT_MULTIPLIER, GateResult, Leg, TradeIntent,
 
 TTL_SECONDS = 45.0
 EXACT_RETRY_MAX_AGE_SECONDS = 45.0
+TERMINAL_PUSH_TARGET_PCT = 20.0
+TERMINAL_PUSH_MIN_TARGET_FRACTION = 0.85
+TERMINAL_PUSH_FOLLOW_ON_ROBUST_PCT = 4.0
 
 
 class StagedOrder:
@@ -252,7 +255,8 @@ class Executor:
     def __init__(self, rest: Rest, params: RiskParams, profile_name: str,
                  mode: str = "propose", ledger: ExecutionLedger | None = None,
                  expected_account_id: str | None = None,
-                 enforce_entry_risk: bool = False):
+                 enforce_entry_risk: bool = False,
+                 sizing_posture: str = "balanced"):
         self.rest = rest
         self.params = params
         self.profile_name = profile_name
@@ -273,6 +277,19 @@ class Executor:
         # and unit tests, but production entry can never omit the evidence/stress
         # path accidentally.
         self.enforce_entry_risk = bool(enforce_entry_risk)
+        self.sizing_posture = str(sizing_posture)
+
+    def _terminal_push_used(self) -> bool:
+        """Return whether the durable one-shot terminal allocation was spent."""
+        if self.sizing_posture != "terminal_push" or self.ledger is None:
+            return False
+        for row in self.ledger.executions().values():
+            if (row.get("purpose") == "entry"
+                    and row.get("sizing_posture") == "terminal_push"
+                    and row.get("status") not in {"rejected", "not_found"}):
+                # UNKNOWN counts as used because the broker may own the order.
+                return True
+        return False
 
     def begin_cycle(self, cycle_id: str) -> None:
         """Staging is deliberately scoped to one model decision cycle."""
@@ -346,6 +363,15 @@ class Executor:
             robust_pct=self.params.robust_evidence_risk_pct,
             supported_pct=self.params.supported_evidence_risk_pct,
             partial_pct=self.params.partial_evidence_risk_pct)
+        terminal_push_used = self._terminal_push_used()
+        if (self.sizing_posture == "terminal_push" and terminal_push_used
+                and evidence["tier"] == "robust"):
+            follow_on_pct = min(
+                evidence["ceiling_pct"], TERMINAL_PUSH_FOLLOW_ON_ROBUST_PCT)
+            evidence["ceiling_pct"] = follow_on_pct
+            evidence["ceiling_dollars"] = (
+                max(float(equity), 0.0) * follow_on_pct / 100.0)
+            evidence["terminal_push_used"] = True
         scheduled = (entry_evidence or {}).get("scheduled_events") or {}
         next_event = scheduled.get("next_event") or {}
         minutes_until_event = next_event.get("minutes_until")
@@ -377,6 +403,21 @@ class Executor:
             intent, net, equity, open_premium_at_risk=open_premium_at_risk,
             realised_loss=realised_loss, account=account,
             evidence_budget=evidence_budget, quantity_ceiling=quantity_ceiling)
+        terminal_target_qty = 0
+        if (self.sizing_posture == "terminal_push"
+                and not terminal_push_used
+                and evidence["tier"] == "robust"
+                and quantity_ceiling is None):
+            per_unit = float(sizing.get("per_unit_max_loss") or 0)
+            if per_unit > 0:
+                terminal_target_qty = int(
+                    (float(equity) * TERMINAL_PUSH_TARGET_PCT / 100.0) // per_unit)
+                sizing["terminal_push_target"] = {
+                    "target_risk_pct": TERMINAL_PUSH_TARGET_PCT,
+                    "target_qty": terminal_target_qty,
+                    "target_budget_dollars": round(
+                        terminal_target_qty * per_unit, 2),
+                }
         if self.enforce_entry_risk:
             sizing["fresh_price_edge"] = evidence.get("fresh_price_edge")
 
@@ -393,8 +434,18 @@ class Executor:
                 sigma_by_underlying=sigmas,
                 horizon_days=self.params.scenario_horizon_days,
                 iv_shocks=(0.0, self.params.scenario_iv_shock_pct / 100.0))
+            scenario_input_qty = qty
+            if terminal_target_qty > qty:
+                unconstrained = [
+                    int(value) for name, value in sizing["headroom_qty"].items()
+                    if name not in {"requested_budget", "confirmation_ceiling"}
+                ]
+                if unconstrained:
+                    scenario_input_qty = max(
+                        qty, min(terminal_target_qty, min(unconstrained)))
             scenario = portfolio_risk.assess_admission(
-                stress, equity, self.params.max_correlated_scenario_loss_pct, qty)
+                stress, equity, self.params.max_correlated_scenario_loss_pct,
+                scenario_input_qty)
             binding = (stress or {}).get("worst_current") or {}
             binding_row = next((row for row in (stress or {}).get("scenarios") or []
                                 if (row.get("spot_expected_move_multiple") ==
@@ -413,6 +464,26 @@ class Executor:
                 qty = scenario_qty
                 sizing["allowed_qty"] = qty
                 sizing["binding_constraint"] = "portfolio_scenario"
+            if terminal_target_qty > 0:
+                non_requested = [
+                    int(value) for name, value in sizing["headroom_qty"].items()
+                    if name not in {"requested_budget", "confirmation_ceiling"}
+                ]
+                terminal_capacity = min(non_requested) if non_requested else 0
+                if (terminal_capacity >= terminal_target_qty
+                        and int(sizing.get("requested_qty") or 0)
+                        < math.ceil(terminal_target_qty
+                                    * TERMINAL_PUSH_MIN_TARGET_FRACTION)):
+                    target = dict(sizing["terminal_push_target"])
+                    target.update({
+                        "status": "reconsider_sizing",
+                        "requested_qty": int(sizing.get("requested_qty") or 0),
+                        "requested_risk_dollars": round(
+                            int(sizing.get("requested_qty") or 0)
+                            * float(sizing.get("per_unit_max_loss") or 0), 2),
+                        "available_qty": terminal_capacity,
+                    })
+                    sizing["reconsider_sizing"] = target
         risk_reducing = bool(
             scenario and scenario.get("status") == "ok"
             and not scenario.get("resulting_breached")
@@ -779,6 +850,20 @@ class Executor:
             staged = self.materialise(
                 canonical, economic_condition=condition,
                 authorization_deadline=deadline, **materialise_kwargs)
+            reconsider = staged.sizing.get("reconsider_sizing")
+            if staged.passed and reconsider:
+                self._staged.pop(key, None)
+                return {
+                    **reconsider,
+                    "reason": (
+                        "excellent evidence is materially below the terminal "
+                        "allocation despite sufficient host headroom"),
+                    "sizing": staged.sizing,
+                    "checklist": staged.checklist(),
+                    "next": (
+                        "re-run with the identical candidate and a risk_budget "
+                        "near target_budget_dollars, or decline the trade"),
+                }
             maximum_profit = (None if staged.verified.max_profit == st.UNBOUNDED
                               else staged.verified.max_profit)
             if not staged.economic_condition_passed:
@@ -907,7 +992,8 @@ class Executor:
                         "legs": self._legs_json(v.intent), "qty": v.qty,
                         "signed_limit_price": v.limit_price,
                         "max_loss_per_unit": v.max_loss / v.qty if v.qty else 0.0,
-                        "cycle_id": self.cycle_id})
+                        "cycle_id": self.cycle_id,
+                        "sizing_posture": self.sizing_posture})
         raw_status = str(order.get("status") or "submitted")
         attempt = raw_status if raw_status in ("unknown", "rejected", "mismatch") \
             else "submitted"
@@ -998,7 +1084,8 @@ class Executor:
                         "signed_limit_price": v.limit_price,
                         "max_loss_per_unit": v.max_loss / v.qty if v.qty else 0.0,
                         "cycle_id": self.cycle_id,
-                        "reason": f"action trigger {trigger_id}"})
+                        "reason": f"action trigger {trigger_id}",
+                        "sizing_posture": self.sizing_posture})
         raw_status = str(order.get("status") or "submitted")
         if raw_status in ("unknown", "rejected", "mismatch"):
             return {**order, "qty": v.qty, "limit_price": v.limit_price,

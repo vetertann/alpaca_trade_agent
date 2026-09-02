@@ -22,6 +22,16 @@ DEFAULT_SIZING_POSTURE = "balanced"
 
 SIZING_POSTURE_GUIDANCE = {
     "balanced": "",
+    "scaled_balanced": (
+        "**Runtime sizing posture: scaled balanced.** Preserve the ordinary "
+        "candidate selection, diversification, management, and refusal logic. "
+        "Do not prefer a trade merely because more risk is available. When the "
+        "candidate you would already choose has three positive measures, stable "
+        "rank, fresh edge after friction, and no conflicting directional evidence, "
+        "aim to use 7–10% of equity maximum loss, up to the configured robust "
+        "ceiling. Use less when a named candidate-specific or host constraint "
+        "justifies it. Weaker evidence keeps its ordinary 1.5%/0.5% ceilings."
+    ),
     "high_variance": (
         "**Runtime sizing posture: high-variance tournament.** For a genuinely "
         "different candidate that has three positive measures, stable rank, fresh "
@@ -33,6 +43,24 @@ SIZING_POSTURE_GUIDANCE = {
         "weak evidence, duplicate a payoff, average down, or spend risk merely "
         "because headroom exists. A reasoned no-trade remains valid when no candidate "
         "qualifies."
+    ),
+    "terminal_push": (
+        "**Runtime sizing posture: terminal raw-P&L push.** The judged objective "
+        "is terminal account equity, not long-horizon risk-adjusted return. Before "
+        "the first new entry, compare at least one bullish direction-led candidate, "
+        "one bearish direction-led candidate, and suitable volatility-led "
+        "alternatives. For the single best genuinely different candidate with "
+        "three positive measures, stable rank, fresh edge after friction, liquid "
+        "quotes, and no conflicting directional evidence, target 20% of equity "
+        "maximum loss and permit up to the configured 25% ceiling. Prefer an "
+        "aligned defined-risk directional structure; a volatility-led candidate "
+        "deserves terminal size only when its weakest measure remains strongly "
+        "positive after adverse IV repricing. The host permits only one terminal-"
+        "sized submission and will request reconsideration when excellent evidence "
+        "is materially undersized despite sufficient headroom. After that "
+        "submission, ordinary robust entries revert to a 4% ceiling. Never promote "
+        "weak evidence, duplicate exposure, average down, or trade merely to spend "
+        "risk; no-trade remains correct when nothing qualifies."
     ),
 }
 
@@ -62,15 +90,15 @@ def _layer(name: str, robust_risk_pct: float = DEFAULT_ROBUST_RISK_PCT,
            aligned_direction_risk_pct: float = DEFAULT_ALIGNED_DIRECTION_RISK_PCT,
            build_target_risk_pct: float = DEFAULT_BUILD_TARGET_RISK_PCT,
            sizing_posture: str = DEFAULT_SIZING_POSTURE) -> str:
-    if not 0 < robust_risk_pct <= 0.15:
-        raise ValueError("robust_risk_pct must be in (0, 0.15]")
+    if not 0 < robust_risk_pct <= 0.25:
+        raise ValueError("robust_risk_pct must be in (0, 0.25]")
     if not 0 < scenario_risk_pct <= 0.25:
         raise ValueError("scenario_risk_pct must be in (0, 0.25]")
     for label, value, limit in (
             ("single_position_risk_pct", single_position_risk_pct, 0.25),
             ("total_premium_risk_pct", total_premium_risk_pct, 0.60),
             ("realised_loss_throttle_pct", realised_loss_throttle_pct, 0.25),
-            ("aligned_direction_risk_pct", aligned_direction_risk_pct, 0.15),
+            ("aligned_direction_risk_pct", aligned_direction_risk_pct, 0.25),
             ("build_target_risk_pct", build_target_risk_pct, 0.25)):
         if not 0 < value <= limit:
             raise ValueError(f"{label} must be in (0, {limit}]")

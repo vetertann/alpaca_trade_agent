@@ -108,6 +108,7 @@ class ExecutionLedger:
                            signed_limit_price: float, max_loss_per_unit: float,
                            cycle_id: str | None, reason: str = "",
                            must_fill: bool = False, exit_intent_id: str = "",
+                           sizing_posture: str = "",
                            request_fingerprint: str | None = None) -> dict:
         """Durably record exactly what will be sent before the broker call.
 
@@ -132,7 +133,8 @@ class ExecutionLedger:
                 max_loss_per_unit=float(max_loss_per_unit), cycle_id=cycle_id,
                 reason=reason, status="pre_submit", lookup_attempts=0,
                 consecutive_404=0, must_fill=bool(must_fill),
-                exit_intent_id=str(exit_intent_id or ""))
+                exit_intent_id=str(exit_intent_id or ""),
+                sizing_posture=str(sizing_posture or ""))
 
     # ---- durable mandatory exits -----------------------------------------
     def exit_intents(self) -> dict[str, dict]:

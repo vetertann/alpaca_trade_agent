@@ -1285,7 +1285,7 @@ class Capabilities:
         if self._submitted_this_program:
             raise CapabilityError("a market action was already authorized in this program")
         ti = _intent_from_dict(intent)
-        out, _ = self._entry_precheck(ti)
+        out, materialise_kwargs = self._entry_precheck(ti)
         if out is not None:
             self._trading_result = dict(out)
             return out
@@ -1293,6 +1293,27 @@ class Capabilities:
             condition = entry_condition(
                 max_entry_debit=max_entry_debit,
                 min_entry_credit=min_entry_credit)
+            # A terminal-push entry trigger must not become a bypass around the
+            # same host-owned undersizing reconsideration used by direct entry.
+            # Other sizing postures retain their existing trigger behaviour.
+            if getattr(self.ex, "sizing_posture", "balanced") == "terminal_push":
+                preview = self.ex.materialise(
+                    ti, **(materialise_kwargs or {}), store=False)
+                reconsider = preview.sizing.get("reconsider_sizing")
+                if preview.passed and reconsider:
+                    out = {
+                        **reconsider,
+                        "reason": (
+                            "excellent evidence is materially below the terminal "
+                            "allocation despite sufficient host headroom"),
+                        "sizing": preview.sizing,
+                        "checklist": preview.checklist(),
+                        "next": (
+                            "re-arm the identical candidate with a risk_budget near "
+                            "target_budget_dollars, or decline the trade"),
+                    }
+                    self._trading_result = dict(out)
+                    return out
             row = self.action_triggers.set_entry(
                 ti, condition=condition,
                 valid_for_seconds=float(valid_for_seconds),

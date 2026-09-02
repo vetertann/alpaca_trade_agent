@@ -129,6 +129,42 @@ def test_balanced_prompt_does_not_receive_high_variance_motivation():
     balanced = prompt.system_prompt()
     assert "high-variance tournament" not in balanced
     assert "normally 7–10% of equity" not in balanced
+    assert "scaled balanced" not in balanced
+    assert "terminal raw-P&L push" not in balanced
+
+
+def test_scaled_balanced_preserves_selection_and_only_scales_best_evidence():
+    scaled = prompt.system_prompt(
+        robust_risk_pct=0.10,
+        scenario_risk_pct=0.10,
+        single_position_risk_pct=0.10,
+        total_premium_risk_pct=0.30,
+        aligned_direction_risk_pct=0.10,
+        sizing_posture="scaled_balanced",
+    )
+    assert "Preserve the ordinary candidate selection" in scaled
+    assert "aim to use 7–10% of equity maximum loss" in scaled
+    assert "Weaker evidence keeps its ordinary 1.5%/0.5% ceilings" in scaled
+    assert "terminal raw-P&L push" not in scaled
+
+
+def test_terminal_push_renders_one_shot_target_and_accepts_25_percent_bounds():
+    terminal = prompt.system_prompt(
+        robust_risk_pct=0.25,
+        scenario_risk_pct=0.25,
+        single_position_risk_pct=0.25,
+        total_premium_risk_pct=0.60,
+        realised_loss_throttle_pct=0.25,
+        aligned_direction_risk_pct=0.25,
+        build_target_risk_pct=0.20,
+        sizing_posture="terminal_push",
+    )
+    assert "target 20% of equity maximum loss" in terminal
+    assert "configured 25% ceiling" in terminal
+    assert "only one terminal-sized submission" in terminal
+    assert "ordinary robust entries revert to a 4% ceiling" in terminal
+    assert "the 60% portfolio" in terminal
+    assert "{{" not in terminal
 
 
 def test_scenario_variant_is_rendered_everywhere_and_versioned():

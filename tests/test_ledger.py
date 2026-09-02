@@ -58,6 +58,19 @@ def test_normalizes_legs_to_one_structure_and_derives_risk(tmp_path):
     assert state["realised_loss"] == 0.0
 
 
+def test_pre_submit_preserves_sizing_posture_for_restart_safe_one_shot(tmp_path):
+    ledger = ExecutionLedger(tmp_path / "execution.jsonl")
+    prepared = ledger.prepare_submission(
+        client_order_id="x-terminal", request={}, structure_id="spread-1",
+        purpose="entry", thesis_id="th_spy", underlying="SPY",
+        family="vertical_call", legs=LEGS, qty=2,
+        signed_limit_price=2.70, max_loss_per_unit=270.0,
+        cycle_id="cycle-1", sizing_posture="terminal_push")
+
+    assert prepared["sizing_posture"] == "terminal_push"
+    assert ledger.executions()["x-terminal"]["sizing_posture"] == "terminal_push"
+
+
 def test_partial_exit_realised_loss_and_restart_recovery(tmp_path):
     path = tmp_path / "execution.jsonl"
     ledger = ExecutionLedger(path)

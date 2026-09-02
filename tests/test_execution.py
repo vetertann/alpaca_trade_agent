@@ -170,6 +170,106 @@ def test_fresh_price_repricing_refuses_when_weakest_edge_falls_below_live_fricti
     assert staged.sizing["fresh_price_edge"]["required_expected_profit"] == 30.0
 
 
+def terminal_params():
+    return replace(
+        RP,
+        robust_evidence_risk_pct=25.0,
+        max_correlated_scenario_loss_pct=25.0,
+        max_single_position_pct=25.0,
+        max_total_premium_at_risk_pct=60.0,
+        max_aligned_direction_risk_pct=25.0,
+    )
+
+
+def terminal_executor(*, ledger=None, posture="terminal_push"):
+    rest = FakeRest(GOOD_QUOTES)
+    ex = Executor(
+        rest, terminal_params(), "competition", mode="execute", ledger=ledger,
+        expected_account_id=EXPECTED_ACCOUNT_ID, enforce_entry_risk=True,
+        sizing_posture=posture,
+    )
+    ex.begin_cycle("terminal-cycle")
+    ex.begin_program(1)
+    return ex, rest
+
+
+def test_terminal_push_reconsiders_materially_undersized_excellent_entry():
+    ex, rest = terminal_executor()
+
+    out = ex.execute(
+        vertical(5_000), equity=100_000, now=NOW,
+        entry_evidence=evidence(), market_spots={"SPY": 772})
+
+    assert out["status"] == "reconsider_sizing"
+    assert out["target_risk_pct"] == 20.0
+    assert out["target_qty"] == 74
+    assert out["requested_qty"] == 18
+    assert out["available_qty"] >= out["target_qty"]
+    assert ex.latest_staged is None
+    assert rest.submitted == []
+
+
+def test_terminal_push_accepts_target_sized_excellent_entry_for_review():
+    ex, rest = terminal_executor()
+
+    out = ex.execute(
+        vertical(20_000), equity=100_000, now=NOW,
+        entry_evidence=evidence(), market_spots={"SPY": 772})
+
+    assert out["status"] == "staged"
+    assert out["qty"] == 74
+    assert out["passed"] is True
+    assert rest.submitted == []
+
+
+def test_terminal_push_does_not_fuss_over_a_near_target_request():
+    ex, rest = terminal_executor()
+
+    out = ex.execute(
+        vertical(18_000), equity=100_000, now=NOW,
+        entry_evidence=evidence(), market_spots={"SPY": 772})
+
+    assert out["status"] == "staged"
+    assert out["qty"] == 66
+    assert rest.submitted == []
+
+
+def test_scaled_balanced_never_receives_terminal_undersizing_coercion():
+    ex, rest = terminal_executor(posture="scaled_balanced")
+
+    out = ex.execute(
+        vertical(5_000), equity=100_000, now=NOW,
+        entry_evidence=evidence(), market_spots={"SPY": 772})
+
+    assert out["status"] == "staged"
+    assert out["qty"] == 18
+    assert "terminal_push_target" not in out["sizing"]
+    assert rest.submitted == []
+
+
+def test_terminal_push_is_durable_and_follow_on_robust_entries_revert_to_four_pct(
+        tmp_path):
+    ledger = ExecutionLedger(tmp_path / "execution.jsonl")
+    ledger.prepare_submission(
+        client_order_id="x-terminal-used", request={}, structure_id="s-used",
+        purpose="entry", thesis_id="th-used", underlying="SPY",
+        family="vertical_call", legs=[], qty=1, signed_limit_price=1.0,
+        max_loss_per_unit=1.0, cycle_id="earlier-cycle",
+        sizing_posture="terminal_push")
+    ex, _ = terminal_executor(ledger=ledger)
+
+    staged = ex.materialise(
+        vertical(20_000), equity=100_000, now=NOW,
+        entry_evidence=evidence(), market_spots={"SPY": 772})
+
+    assert staged.verified.qty == 14
+    assert staged.sizing["headroom_qty"]["volatility_evidence"] == 14
+    assert "terminal_push_target" not in staged.sizing
+    evidence_gate = next(
+        row for row in staged.results if row.name == "volatility_evidence")
+    assert "ceiling $4,000" in evidence_gate.reason
+
+
 def test_count_cap_exemption_uses_positive_binding_scenario_effect_not_family_label(
         monkeypatch):
     from agent.host import portfolio_risk

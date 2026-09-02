@@ -146,15 +146,15 @@ class Agent:
         self.prof = profile(profile_name)
         self.profile_name = profile_name
         self.mode = mode
-        if not 0 < robust_risk_pct <= 0.15:
-            raise ValueError("robust_risk_pct must be in (0, 0.15]")
+        if not 0 < robust_risk_pct <= 0.25:
+            raise ValueError("robust_risk_pct must be in (0, 0.25]")
         if not 0 < scenario_risk_pct <= 0.25:
             raise ValueError("scenario_risk_pct must be in (0, 0.25]")
         for label, value, limit in (
                 ("single_position_risk_pct", single_position_risk_pct, 0.25),
                 ("total_premium_risk_pct", total_premium_risk_pct, 0.60),
                 ("realised_loss_throttle_pct", realised_loss_throttle_pct, 0.25),
-                ("aligned_direction_risk_pct", aligned_direction_risk_pct, 0.15),
+                ("aligned_direction_risk_pct", aligned_direction_risk_pct, 0.25),
                 ("build_target_risk_pct", build_target_risk_pct, 0.25)):
             if not 0 < value <= limit:
                 raise ValueError(f"{label} must be in (0, {limit}]")
@@ -202,7 +202,8 @@ class Agent:
         self.settlement_authorizations = SettlementAuthorizationStore(
             f"{run_dir}/settlement_authorizations.jsonl")
         self.executor = Executor(self.rest, self.params, profile_name, mode=mode,
-                                 ledger=self.ledger, enforce_entry_risk=True)
+                                 ledger=self.ledger, enforce_entry_risk=True,
+                                 sizing_posture=sizing_posture)
         self.triggers = TriggerState()
         self.sandbox = Sandbox(self._dispatch, workdir=run_dir, timeout_s=CYCLE_BUDGET_S)
         self.provider = providers.for_role("decision", dev=dev_models, max_tokens=8000)
@@ -2058,7 +2059,7 @@ def main() -> None:
                     help="aligned direction-led position ceiling as an equity fraction")
     ap.add_argument("--build-target-risk-pct", type=float, default=0.035,
                     help="scenario-risk level below which periodic build reviews continue")
-    ap.add_argument("--sizing-posture", choices=["balanced", "high_variance"],
+    ap.add_argument("--sizing-posture", choices=sorted(prompt.SIZING_POSTURE_GUIDANCE),
                     default="balanced",
                     help="model-facing sizing motivation; host gates remain authoritative")
     args = ap.parse_args()

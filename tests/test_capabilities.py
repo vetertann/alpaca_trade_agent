@@ -1,6 +1,7 @@
 """Host-side logic that does not need a broker."""
 import pytest
 import datetime as dt
+from types import SimpleNamespace
 from agent.host.capabilities import _diverse
 from agent.host.capabilities import Capabilities, CapabilityError
 from agent.host.action_triggers import ActionTriggerStore
@@ -224,6 +225,46 @@ def test_model_can_arm_list_and_remove_exact_exit_trigger(tmp_path):
     assert removed["status"] == "trigger_removed"
     assert removed["trigger_status"] == "cancelled"
     assert caps._trading_list_triggers() == []
+
+
+def test_terminal_push_entry_trigger_cannot_bypass_undersizing_reconsideration(
+        tmp_path):
+    caps = object.__new__(Capabilities)
+    caps.action_triggers = ActionTriggerStore(tmp_path / "action_triggers.jsonl")
+    caps._submitted_this_program = False
+    caps._trading_result = None
+    caps._entry_precheck = lambda _intent: (None, {"equity": 100_000})
+    caps._market_spot = lambda _symbol: 772.0
+    caps.entry_evidence = lambda _intent: {}
+    caps.ex = SimpleNamespace(
+        sizing_posture="terminal_push",
+        materialise=lambda *_args, **_kwargs: SimpleNamespace(
+            passed=True,
+            sizing={"reconsider_sizing": {
+                "status": "reconsider_sizing", "target_qty": 74,
+                "target_budget_dollars": 19_980.0}},
+            checklist=lambda: "PASS host gates"),
+    )
+    intent = {
+        "underlying": "SPY", "family": "vertical_call",
+        "thesis_id": "th-test", "risk_budget": 5_000,
+        "legs": [
+            {"symbol": "SPY260903C00770000", "ratio_qty": 1,
+             "side": "buy", "position_intent": "buy_to_open",
+             "strike": 770, "option_type": "call", "expiry": "2026-09-03"},
+            {"symbol": "SPY260903C00775000", "ratio_qty": 1,
+             "side": "sell", "position_intent": "sell_to_open",
+             "strike": 775, "option_type": "call", "expiry": "2026-09-03"},
+        ],
+    }
+
+    out = caps._trading_set_entry_trigger(
+        intent, max_entry_debit=2.75, reason="wait for executable price")
+
+    assert out["status"] == "reconsider_sizing"
+    assert out["target_qty"] == 74
+    assert caps.action_triggers.current() == {}
+    assert caps._submitted_this_program is False
 
 
 class ControlExecutor:
