@@ -1960,6 +1960,11 @@ class Agent:
                     self.triggers.new_session()
                 last_state = state
 
+            # Evidence accounting must not wait behind a potentially slow Tier-2
+            # model cycle. This also guarantees that a restart migrates and
+            # settles durable shadow state before the dashboard can present it.
+            self._shadow_tick(now, state)
+
             if state != "CLOSED":
                 allowed, why = entries_allowed(now, trading_day)
                 book = self.rest.positions()
@@ -2024,7 +2029,6 @@ class Agent:
                 elif trig:
                     self.trace.note("trigger_suppressed", trigger=trig.name, reason=why)
             self._health_check()
-            self._shadow_tick(now, state)
             self.series.checkpoint(f"{self.run_dir}/series.json")
             self._checkpoint_runtime_state(now)
             await asyncio.sleep(tick_seconds)
