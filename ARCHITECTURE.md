@@ -1119,6 +1119,13 @@ out of equity as though the premium had evaporated — including when it expired
 in the money. Without re-entry a "fixed bull call spread" baseline would measure one
 Monday trade rather than the strategy.
 
+Expiry settlement uses the expiry day's Alpaca daily regular-session close. The
+Basic historical feed exposes that bar after its delay, so an expired shadow
+position remains explicitly pending until the close is available; a current or
+next-morning spot is never substituted. Durable shadow state records
+`exit_source=expiry_regular_close`. Schema-1 books are migrated by reopening the
+identifiable next-morning settlements and replaying them from the correct close.
+
 ### Shock simulation and chronological calibration
 
 Generated programs can still inspect `options.payoff` and the expected-move
@@ -1354,7 +1361,7 @@ helper is a no-op when disabled, so telemetry can never break trading.
 
 ## 15. Build status
 
-Implemented and verified. **414 tests.**
+Implemented and verified. **481 tests.**
 
 | Component | Module | State |
 |---|---|---|

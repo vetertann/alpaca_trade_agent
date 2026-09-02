@@ -1538,25 +1538,63 @@ class Agent:
     def step_shadow(self, now: dt.datetime, may_enter: bool) -> None:
         """One shadow tick against the same live quotes the agent sees."""
         try:
+            settlement_spots: dict[dt.date, float] = {}
+            cache = getattr(self, "_shadow_settlement_spots", {})
+            self._shadow_settlement_spots = cache
+            for expiry in sorted(self.shadow.pending_expiries(now)):
+                close = dt.datetime.combine(expiry, dt.time(16, 0), tzinfo=ET)
+                # Alpaca's Basic historical feed is delayed by about 15 minutes.
+                # Until the expiry-day daily close is available, leave the
+                # position pending rather than substitute a later live price.
+                if now.astimezone(ET) < close + dt.timedelta(minutes=16):
+                    continue
+                if expiry not in cache:
+                    start = dt.datetime.combine(expiry, dt.time(0, 0), tzinfo=ET)
+                    end = start + dt.timedelta(days=1)
+                    bars = self.rest.stock_bars(
+                        "SPY", "1Day", start.astimezone(dt.timezone.utc).isoformat(),
+                        end.astimezone(dt.timezone.utc).isoformat())
+                    dated = [bar for bar in bars if
+                             dt.datetime.fromisoformat(
+                                 str(bar["t"]).replace("Z", "+00:00")
+                             ).astimezone(ET).date() == expiry]
+                    if not dated:
+                        continue
+                    cache[expiry] = float(dated[-1]["c"])
+                    self.trace.note(
+                        "shadow_settlement_price", expiry=expiry.isoformat(),
+                        underlying="SPY", spot=cache[expiry],
+                        source="alpaca_daily_regular_close")
+                settlement_spots[expiry] = cache[expiry]
+
+            settled = self.shadow.settle_at_regular_closes(settlement_spots, now)
+            for message in settled:
+                self.trace.note("shadow_settlement", detail=message)
+
             spot = self.series.last("SPY") or float(
                 self.rest.stock_latest_trade("SPY")["p"])
-            if self.caps is None:
-                caps = Capabilities(self.rest, self.series, self.theses, self.executor,
-                                    self.params, equity=0.0,
-                                    exit_policies=getattr(self, "exit_policies", None))
-            else:
-                caps = self.caps
-            # Shadow policies are a fixed near-term comparator, not the agent's
-            # opportunity universe.  Do not make every shadow tick download and
-            # quote the complete long-dated catalogue.
-            shadow_last = self.expiries[min(len(self.expiries), 4) - 1]
-            chain = caps.dispatch("options", "tradeable_chain",
-                                  ["SPY", self.expiries[0], shadow_last],
-                                  {"width": 8})
-            quotes = self.rest.option_quotes(
+            chain: list[dict] = []
+            if may_enter:
+                if self.caps is None:
+                    caps = Capabilities(
+                        self.rest, self.series, self.theses, self.executor,
+                        self.params, equity=0.0,
+                        exit_policies=getattr(self, "exit_policies", None))
+                else:
+                    caps = self.caps
+                # Shadow policies are a fixed near-term comparator, not the
+                # agent's opportunity universe. Do not download the complete
+                # long-dated catalogue on every shadow tick.
+                shadow_last = self.expiries[min(len(self.expiries), 4) - 1]
+                chain = caps.dispatch("options", "tradeable_chain",
+                                      ["SPY", self.expiries[0], shadow_last],
+                                      {"width": 8})
+            symbols = list(dict.fromkeys(
                 [c["symbol"] for c in chain]
-                + [l.symbol for b in self.shadow.books.values()
-                   for p in b.positions if p.open for l in p.legs])
+                + [leg.symbol for book in self.shadow.books.values()
+                   for position in book.positions if position.open
+                   for leg in position.legs]))
+            quotes = self.rest.option_quotes(symbols) if symbols else {}
             self.shadow.step(chain, spot, quotes, now, may_enter=may_enter)
             self.shadow.record(quotes, now)
         except Exception as exc:                      # never let shadow break the agent
@@ -1866,7 +1904,16 @@ class Agent:
     def _shadow_tick(self, now: dt.datetime, state: str, every_s: float = 600.0) -> None:
         last = getattr(self, "_last_shadow", None)
         if state == "CLOSED":
-            return
+            pending = self.shadow.pending_expiries(now)
+            if not pending:
+                return
+            ready = any(
+                now.astimezone(ET) >= (
+                    dt.datetime.combine(expiry, dt.time(16, 0), tzinfo=ET)
+                    + dt.timedelta(minutes=16))
+                for expiry in pending)
+            if not ready:
+                return
         if last and (now - last).total_seconds() < every_s:
             return
         self._last_shadow = now

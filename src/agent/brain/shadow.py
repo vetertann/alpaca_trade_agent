@@ -32,6 +32,7 @@ class ShadowPosition:
     thesis: str
     closed_at: dt.datetime | None = None
     exit_price: float | None = None
+    exit_source: str | None = None
 
     @property
     def open(self) -> bool:
@@ -80,6 +81,7 @@ class ShadowPosition:
                 "thesis": self.thesis,
                 "closed_at": self.closed_at.isoformat() if self.closed_at else None,
                 "exit_price": self.exit_price,
+                "exit_source": self.exit_source,
                 "legs": legs}
 
     @classmethod
@@ -97,7 +99,9 @@ class ShadowPosition:
                    closed_at=(dt.datetime.fromisoformat(raw["closed_at"])
                               if raw.get("closed_at") else None),
                    exit_price=(float(raw["exit_price"])
-                               if raw.get("exit_price") is not None else None))
+                               if raw.get("exit_price") is not None else None),
+                   exit_source=(str(raw["exit_source"])
+                                if raw.get("exit_source") else None))
 
 
 class ShadowBook:
@@ -123,6 +127,7 @@ class ShadowBook:
         """Settle at intrinsic value against the underlying, not against a quote."""
         per_unit = st.net_payoff_at(pos.legs, spot) / CONTRACT_MULTIPLIER
         pos.closed_at, pos.exit_price = when, per_unit
+        pos.exit_source = "expiry_regular_close"
         proceeds = per_unit * pos.qty * CONTRACT_MULTIPLIER
         self.cash += proceeds
         self.realised += proceeds - pos.entry_price * pos.qty * CONTRACT_MULTIPLIER
@@ -133,6 +138,7 @@ class ShadowBook:
         if m is None:
             return False
         pos.closed_at, pos.exit_price = when, m
+        pos.exit_source = "live_executable_quote"
         proceeds = m * pos.qty * CONTRACT_MULTIPLIER
         self.cash += proceeds
         self.realised += proceeds - pos.entry_price * pos.qty * CONTRACT_MULTIPLIER
@@ -147,6 +153,39 @@ class ShadowBook:
             if m is not None:
                 held += m * p.qty * CONTRACT_MULTIPLIER
         return self.cash + held
+
+    def rebuild_accounting(self) -> None:
+        """Recompute cash and realised P&L from the durable position journal."""
+        self.cash = self.starting_equity
+        self.realised = 0.0
+        for pos in self.positions:
+            basis = pos.entry_price * pos.qty * CONTRACT_MULTIPLIER
+            self.cash -= basis
+            if pos.closed_at is None or pos.exit_price is None:
+                continue
+            proceeds = pos.exit_price * pos.qty * CONTRACT_MULTIPLIER
+            self.cash += proceeds
+            self.realised += proceeds - basis
+
+    def reopen_late_v1_settlements(self) -> int:
+        """Undo schema-1 settlements made from the following morning's spot.
+
+        Before schema 2 the closed-session shadow tick was skipped.  An expired
+        option was therefore settled on the next active tick, against the next
+        morning's underlying price.  Those rows are identifiable because their
+        close date is later than the contract expiry date.
+        """
+        repaired = 0
+        for pos in self.positions:
+            if (pos.closed_at is not None
+                    and pos.closed_at.astimezone(ET).date() > pos.expiry):
+                pos.closed_at = None
+                pos.exit_price = None
+                pos.exit_source = None
+                repaired += 1
+        if repaired:
+            self.rebuild_accounting()
+        return repaired
 
     def summary(self, quotes: dict) -> dict:
         eq = self.equity(quotes)
@@ -249,7 +288,8 @@ class ShadowRunner:
 
     def _restore(self) -> None:
         raw = json.loads(self.state_path.read_text())
-        if raw.get("schema_version") != 1:
+        schema = int(raw.get("schema_version") or 0)
+        if schema not in (1, 2):
             raise ValueError("unsupported shadow state schema")
         restored = {name: ShadowBook.from_state(book)
                     for name, book in (raw.get("books") or {}).items()}
@@ -257,9 +297,12 @@ class ShadowRunner:
             raise ValueError("shadow state policy set is incomplete")
         self.books = restored
         self.epoch_started_at = dt.datetime.fromisoformat(raw["epoch_started_at"])
+        if schema == 1:
+            for book in self.books.values():
+                book.reopen_late_v1_settlements()
 
     def _checkpoint(self) -> None:
-        payload = {"schema_version": 1,
+        payload = {"schema_version": 2,
                    "epoch_started_at": self.epoch_started_at.isoformat(),
                    "risk_budget": self.risk_budget,
                    "books": {name: book.to_state()
@@ -277,14 +320,15 @@ class ShadowRunner:
             os.close(directory)
 
     def step(self, chain: list[dict], spot: float, quotes: dict,
-             when: dt.datetime, *, may_enter: bool) -> dict:
+             when: dt.datetime, *, may_enter: bool,
+             settlement_spots: dict[dt.date, float] | None = None) -> dict:
         """One tick.
 
         Each policy holds at most one position at a time and re-enters once the
         previous one has expired, so a baseline is the strategy run repeatedly
         across the window rather than a single position bought on Monday.
         """
-        self.settle(spot, when)
+        self.settle_at_regular_closes(settlement_spots or {}, when)
         for name, fn in POLICIES.items():
             book = self.books[name]
             live = [p for p in book.positions if p.open]
@@ -302,13 +346,27 @@ class ShadowRunner:
                 book.open_position(legs, qty, price, thesis, when)
         return {n: b.summary(quotes) for n, b in self.books.items()}
 
-    def settle(self, spot: float, when: dt.datetime) -> list[str]:
-        """Settle everything that has reached expiry. Frees each book to re-enter."""
+    def pending_expiries(self, when: dt.datetime) -> set[dt.date]:
+        """Expiry dates awaiting an authoritative regular-close stock price."""
+        return {p.expiry for book in self.books.values() for p in book.positions
+                if p.open and p.expired(when)}
+
+    def settle_at_regular_closes(self, spots: dict[dt.date, float],
+                                 when: dt.datetime) -> list[str]:
+        """Settle expired positions only from their expiry-day close.
+
+        A current spot is deliberately insufficient: after an overnight gap it
+        is not a price the expired option could ever have captured.
+        """
         done = []
         for name, book in self.books.items():
             for p in [x for x in book.positions if x.open and x.expired(when)]:
-                book.settle_expired(p, spot, when)
-                done.append(f"{name} settled {p.expiry} at {spot:.2f}")
+                spot = spots.get(p.expiry)
+                if spot is None:
+                    continue
+                close = dt.datetime.combine(p.expiry, dt.time(16, 0), tzinfo=ET)
+                book.settle_expired(p, float(spot), close)
+                done.append(f"{name} settled {p.expiry} at {float(spot):.2f}")
         return done
 
     def close_all(self, quotes: dict, when: dt.datetime) -> None:
@@ -318,7 +376,7 @@ class ShadowRunner:
 
     def record(self, quotes: dict, when: dt.datetime) -> dict:
         self._checkpoint()
-        row = {"schema_version": 1, "ts": when.isoformat(),
+        row = {"schema_version": 2, "ts": when.isoformat(),
                "epoch_started_at": self.epoch_started_at.isoformat(),
                "books": {n: b.summary(quotes) for n, b in self.books.items()}}
         with self.path.open("a") as fh:

@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import pytest
 from agent.brain import shadow
 from agent.types import Leg
@@ -186,7 +187,7 @@ def test_a_position_is_settled_at_expiry_not_dropped():
 
     # the underlying rallies through the spread, then the contracts expire
     tuesday = dt.datetime(2026, 9, 1, 21, 0, tzinfo=dt.timezone.utc)
-    r.settle(790.0, tuesday)
+    r.settle_at_regular_closes({dt.date(2026, 9, 1): 790.0}, tuesday)
     p = book.positions[0]
     assert not p.open, "expired position must be settled"
     # a bull call spread finishing above both strikes settles at its full width
@@ -200,7 +201,9 @@ def test_settlement_uses_intrinsic_value_not_a_quote():
     r.step(ch, 770.0, quotes(ch), dt.datetime(2026, 8, 31, 15, tzinfo=dt.timezone.utc),
            may_enter=True)
     # expiring far below every strike: the spread is worthless, loss is the premium
-    r.settle(700.0, dt.datetime(2026, 9, 1, 21, tzinfo=dt.timezone.utc))
+    r.settle_at_regular_closes(
+        {dt.date(2026, 9, 1): 700.0},
+        dt.datetime(2026, 9, 1, 21, tzinfo=dt.timezone.utc))
     book = r.books["bull_call"]
     assert book.realised < 0
     assert book.equity({}) == pytest.approx(book.cash)
@@ -216,7 +219,8 @@ def test_a_book_re_enters_after_its_position_expires():
 
     wed_chain = chain_exp(770.0, "2026-09-03")
     r.step(wed_chain, 770.0, quotes(wed_chain),
-           dt.datetime(2026, 9, 2, 15, tzinfo=dt.timezone.utc), may_enter=True)
+           dt.datetime(2026, 9, 2, 15, tzinfo=dt.timezone.utc), may_enter=True,
+           settlement_spots={dt.date(2026, 9, 1): 770.0})
     assert len(r.books["bull_call"].positions) == 2, "should have opened a second"
     assert r.books["bull_call"].positions[1].open
 
@@ -235,5 +239,66 @@ def test_flat_cash_never_settles_anything():
     ch = chain_exp()
     r.step(ch, 770.0, quotes(ch), dt.datetime(2026, 8, 31, 15, tzinfo=dt.timezone.utc),
            may_enter=True)
-    r.settle(800.0, dt.datetime(2026, 9, 2, 21, tzinfo=dt.timezone.utc))
+    r.settle_at_regular_closes(
+        {dt.date(2026, 9, 1): 800.0},
+        dt.datetime(2026, 9, 2, 21, tzinfo=dt.timezone.utc))
     assert r.books["flat_cash"].equity({}) == 100_000.0
+
+
+def test_expired_position_never_uses_a_later_live_spot():
+    r = shadow.ShadowRunner()
+    ch = chain_exp(770.0, "2026-09-01")
+    r.step(ch, 770.0, quotes(ch),
+           dt.datetime(2026, 8, 31, 15, tzinfo=dt.timezone.utc), may_enter=True)
+
+    # The next morning gaps to 800.  Without the expiry-close mapping the
+    # position must remain pending; 800 was never an executable expiry value.
+    next_morning = dt.datetime(2026, 9, 2, 14, tzinfo=dt.timezone.utc)
+    r.step([], 800.0, {}, next_morning, may_enter=False)
+    assert r.books["long_straddle"].positions[0].open
+    assert r.pending_expiries(next_morning) == {dt.date(2026, 9, 1)}
+
+
+def test_settlement_records_canonical_close_and_provenance():
+    r = shadow.ShadowRunner()
+    ch = chain_exp(770.0, "2026-09-01")
+    r.step(ch, 770.0, quotes(ch),
+           dt.datetime(2026, 8, 31, 15, tzinfo=dt.timezone.utc), may_enter=True)
+    later = dt.datetime(2026, 9, 2, 14, tzinfo=dt.timezone.utc)
+    r.settle_at_regular_closes({dt.date(2026, 9, 1): 761.66}, later)
+
+    pos = r.books["long_straddle"].positions[0]
+    assert pos.closed_at == dt.datetime(2026, 9, 1, 16, 0, tzinfo=shadow.ET)
+    assert pos.exit_source == "expiry_regular_close"
+
+
+def test_schema_one_late_settlement_is_reopened_and_repaired(tmp_path):
+    path = tmp_path / "shadow.jsonl"
+    first = shadow.ShadowRunner(path=path)
+    ch = chain_exp(770.0, "2026-09-01")
+    first.step(ch, 770.0, quotes(ch),
+               dt.datetime(2026, 8, 31, 15, tzinfo=dt.timezone.utc), may_enter=True)
+    wrong_time = dt.datetime(2026, 9, 2, 9, 30, tzinfo=shadow.ET)
+    for book in first.books.values():
+        for pos in [p for p in book.positions if p.open]:
+            book.settle_expired(pos, 800.0, wrong_time)
+    first.record({}, wrong_time)
+
+    state_path = path.with_suffix(".state.json")
+    raw = json.loads(state_path.read_text())
+    raw["schema_version"] = 1
+    for book in raw["books"].values():
+        for pos in book["positions"]:
+            pos.pop("exit_source", None)
+    state_path.write_text(json.dumps(raw))
+
+    restored = shadow.ShadowRunner(path=path)
+    pos = restored.books["long_straddle"].positions[0]
+    assert pos.open
+    assert restored.pending_expiries(wrong_time) == {dt.date(2026, 9, 1)}
+
+    restored.settle_at_regular_closes(
+        {dt.date(2026, 9, 1): 761.66}, wrong_time)
+    assert not pos.open
+    assert pos.exit_price == pytest.approx(abs(761.66 - 770.0))
+    assert pos.exit_source == "expiry_regular_close"
