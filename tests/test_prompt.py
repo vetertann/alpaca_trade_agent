@@ -163,6 +163,11 @@ def test_terminal_push_renders_one_shot_target_and_accepts_25_percent_bounds():
     assert "configured 25% ceiling" in terminal
     assert "only one terminal-sized submission" in terminal
     assert "ordinary robust entries revert to a 4% ceiling" in terminal
+    assert "Maximum loss is only a safety boundary" in terminal
+    assert "expected_profit_by_measure" in terminal
+    assert "previewed whole-contract quantity" in terminal
+    assert "largest robust executable terminal-equity impact" in terminal
+    assert "later-dated option is eligible only" in terminal
     assert "the 60% portfolio" in terminal
     assert "{{" not in terminal
 
