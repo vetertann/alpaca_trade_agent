@@ -18,11 +18,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from agent.brain.loop import session_state
-from agent.config import ET
+from agent.config import ET, MEASUREMENT_END, WINDOW_OPEN
 
 PANEL = Path(__file__).resolve().parents[1] / "src" / "agent" / "panel" / "index.html"
 MAX_LOG = 60
 MAX_CODE = 20_000
+MAX_RECENT_EQUITY_POINTS = 400
+MAX_FULL_EQUITY_POINTS = 1_600
 
 # $ per million tokens. Only Anthropic reports the cache split, so only Anthropic is
 # priced; everything else contributes tokens without a dollar figure.
@@ -80,6 +82,43 @@ def _shadow(run_dir: Path) -> list[dict]:
 def _number(value) -> str:
     number = float(value)
     return str(int(number)) if number.is_integer() else f"{number:g}"
+
+
+def _in_scored_window(point: dict) -> bool:
+    """Whether an equity mark belongs to the official measurement window."""
+    try:
+        stamp = dt.datetime.fromisoformat(str(point["t"]).replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=ET)
+        return WINDOW_OPEN <= stamp.astimezone(ET) <= MEASUREMENT_END
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _downsample_equity(points: list[dict], max_points: int) -> list[dict]:
+    """Bound a chart series while retaining its first, last, high, and low marks.
+
+    Simple stride sampling can erase the short-lived spikes that matter most in an
+    options equity chart.  Min/max buckets preserve both sides of each interval and
+    retain chronological order while keeping the panel response small.
+    """
+    if max_points < 2:
+        raise ValueError("max_points must be at least 2")
+    if len(points) <= max_points:
+        return points
+
+    interior = points[1:-1]
+    bucket_count = max(1, (max_points - 2) // 2)
+    bucket_size = max(1, (len(interior) + bucket_count - 1) // bucket_count)
+    sampled = [points[0]]
+    for start in range(0, len(interior), bucket_size):
+        bucket = interior[start:start + bucket_size]
+        low = min(range(len(bucket)), key=lambda i: float(bucket[i]["v"]))
+        high = max(range(len(bucket)), key=lambda i: float(bucket[i]["v"]))
+        for index in sorted({low, high}):
+            sampled.append(bucket[index])
+    sampled.append(points[-1])
+    return sampled
 
 
 def _structure_label(position: dict) -> str:
@@ -350,12 +389,18 @@ def build_state(run_dir: Path) -> dict:
     }
 
     equity = equity_series[-1]["v"] if equity_series else None
+    scored_equity = [point for point in equity_series if _in_scored_window(point)]
+    # Old/development traces can sit outside the fixed competition dates. Keep the
+    # panel useful for those traces while making the live chart precisely scoped.
+    full_equity = scored_equity or equity_series
     return {"now": now.isoformat(), "profile": profile, "mode": mode, "model": model,
             "robust_risk_pct": robust_risk_pct,
             "scenario_risk_pct": scenario_risk_pct,
             "session": session_state(now), "cycles": len(cycles),
             "equity": equity, "starting": starting,
-            "equity_series": equity_series[-400:],
+            "equity_series": equity_series[-MAX_RECENT_EQUITY_POINTS:],
+            "equity_series_full": _downsample_equity(
+                full_equity, MAX_FULL_EQUITY_POINTS),
             "positions": [_portfolio_row(p) for p in positions],
             "execution_control": execution_control,
             "portfolio_scenario_risk": portfolio_scenario_risk,

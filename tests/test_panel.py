@@ -10,6 +10,7 @@ assert _SPEC.loader is not None
 _SPEC.loader.exec_module(_PANEL)
 build_state = _PANEL.build_state
 read_shadow = _PANEL._shadow
+downsample_equity = _PANEL._downsample_equity
 
 
 def test_panel_exposes_the_instance_risk_variant(tmp_path):
@@ -25,6 +26,42 @@ def test_panel_exposes_the_instance_risk_variant(tmp_path):
     assert state["profile"] == "dev"
     assert state["robust_risk_pct"] == 0.10
     assert state["scenario_risk_pct"] == 0.10
+
+
+def test_panel_exposes_recent_and_full_equity_ranges(tmp_path):
+    start = 100_000
+    rows = [{
+        "ts": f"2026-08-31T{14 + i // 3600:02d}:{(i // 60) % 60:02d}:{i % 60:02d}+00:00",
+        "kind": "PORTFOLIO", "snapshot": {
+            "equity": start + i, "structures": []},
+    } for i in range(500)]
+    (tmp_path / "trace.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows))
+
+    state = build_state(tmp_path)
+
+    assert len(state["equity_series"]) == 400
+    assert state["equity_series"][0]["v"] == start + 100
+    assert len(state["equity_series_full"]) == 500
+    assert state["equity_series_full"][0]["v"] == start
+
+
+def test_full_equity_downsampling_preserves_extrema_and_order():
+    points = [{"t": f"2026-09-01T14:{i // 60:02d}:{i % 60:02d}+00:00",
+               "v": 100_000 + (i % 7)} for i in range(2_000)]
+    points[731]["v"] = 97_000
+    points[1_416]["v"] = 104_000
+
+    sampled = downsample_equity(points, 100)
+
+    assert len(sampled) <= 100
+    assert sampled[0] is points[0]
+    assert sampled[-1] is points[-1]
+    assert min(point["v"] for point in sampled) == 97_000
+    assert max(point["v"] for point in sampled) == 104_000
+    source_indices = {id(point): index for index, point in enumerate(points)}
+    assert [source_indices[id(point)] for point in sampled] == sorted(
+        source_indices[id(point)] for point in sampled)
 
 
 def test_normalized_structures_render_as_strategy_rows(tmp_path):
