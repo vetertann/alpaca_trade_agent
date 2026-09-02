@@ -22,7 +22,7 @@ ExecStart=/opt/alpaca-agent/.venv/bin/python -m agent.run \
     --robust-risk-pct 0.10 --scenario-risk-pct 0.10 \
     --single-position-risk-pct 0.10 --total-premium-risk-pct 0.30 \
     --realised-loss-throttle-pct 0.15 --aligned-direction-risk-pct 0.10 \
-    --build-target-risk-pct 0.09 \
+    --build-target-risk-pct 0.09 --sizing-posture high_variance \
     --run-dir /opt/alpaca-agent/.run
 
 Restart=always

@@ -180,6 +180,7 @@ are positive with a stable rank; and only 0.5% when two measures are positive wi
 an unstable rank. Fewer than two positive measures is a refusal. Apply the separate
 directional limits above only to direction-led or mixed candidates. These are
 ceilings, not reasons to promote weak evidence.
+{{SIZING_POSTURE_GUIDANCE}}
 The host derives the same evidence tier from the recorded evaluation and ranking;
 generated `risk_budget` cannot override it.
 

@@ -18,6 +18,23 @@ DEFAULT_TOTAL_PREMIUM_RISK_PCT = 0.15
 DEFAULT_REALISED_LOSS_THROTTLE_PCT = 0.06
 DEFAULT_ALIGNED_DIRECTION_RISK_PCT = 0.03
 DEFAULT_BUILD_TARGET_RISK_PCT = 0.035
+DEFAULT_SIZING_POSTURE = "balanced"
+
+SIZING_POSTURE_GUIDANCE = {
+    "balanced": "",
+    "high_variance": (
+        "**Runtime sizing posture: high-variance tournament.** For a genuinely "
+        "different candidate that has three positive measures, stable rank, fresh "
+        "edge after friction, and no conflicting directional evidence, aim to use a "
+        "material share of the configured robust budget—normally 7–10% of equity "
+        "maximum loss—rather than anchoring to the former 4% profile. Use less only "
+        "when a named constraint or candidate-specific uncertainty justifies it. "
+        "This is motivation to deploy strong evidence, not permission to promote "
+        "weak evidence, duplicate a payoff, average down, or spend risk merely "
+        "because headroom exists. A reasoned no-trade remains valid when no candidate "
+        "qualifies."
+    ),
+}
 
 OUTPUT_CONTRACT = """# Output contract
 
@@ -43,7 +60,8 @@ def _layer(name: str, robust_risk_pct: float = DEFAULT_ROBUST_RISK_PCT,
            total_premium_risk_pct: float = DEFAULT_TOTAL_PREMIUM_RISK_PCT,
            realised_loss_throttle_pct: float = DEFAULT_REALISED_LOSS_THROTTLE_PCT,
            aligned_direction_risk_pct: float = DEFAULT_ALIGNED_DIRECTION_RISK_PCT,
-           build_target_risk_pct: float = DEFAULT_BUILD_TARGET_RISK_PCT) -> str:
+           build_target_risk_pct: float = DEFAULT_BUILD_TARGET_RISK_PCT,
+           sizing_posture: str = DEFAULT_SIZING_POSTURE) -> str:
     if not 0 < robust_risk_pct <= 0.15:
         raise ValueError("robust_risk_pct must be in (0, 0.15]")
     if not 0 < scenario_risk_pct <= 0.25:
@@ -66,6 +84,8 @@ def _layer(name: str, robust_risk_pct: float = DEFAULT_ROBUST_RISK_PCT,
             "single_position_risk_pct cannot exceed total_premium_risk_pct")
     if build_target_risk_pct > scenario_risk_pct:
         raise ValueError("build_target_risk_pct cannot exceed scenario_risk_pct")
+    if sizing_posture not in SIZING_POSTURE_GUIDANCE:
+        raise ValueError(f"unknown sizing_posture: {sizing_posture}")
     percent = f"{robust_risk_pct * 100:g}%"
     fraction = f"{robust_risk_pct:g}"
     scenario_percent = f"{scenario_risk_pct * 100:g}%"
@@ -84,7 +104,9 @@ def _layer(name: str, robust_risk_pct: float = DEFAULT_ROBUST_RISK_PCT,
             .replace("{{ALIGNED_DIRECTION_RISK_FRACTION}}",
                      f"{aligned_direction_risk_pct:g}")
             .replace("{{BUILD_TARGET_RISK_PERCENT}}",
-                     f"{build_target_risk_pct * 100:g}%"))
+                     f"{build_target_risk_pct * 100:g}%")
+            .replace("{{SIZING_POSTURE_GUIDANCE}}",
+                     SIZING_POSTURE_GUIDANCE[sizing_posture]))
 
 
 def system_prompt(*, include_pretrade: bool = False,

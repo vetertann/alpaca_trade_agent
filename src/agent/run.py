@@ -140,7 +140,8 @@ class Agent:
                  total_premium_risk_pct: float = 0.15,
                  realised_loss_throttle_pct: float = 0.06,
                  aligned_direction_risk_pct: float = 0.03,
-                 build_target_risk_pct: float = 0.035):
+                 build_target_risk_pct: float = 0.035,
+                 sizing_posture: str = "balanced"):
         self.run_dir = run_dir
         self.prof = profile(profile_name)
         self.profile_name = profile_name
@@ -167,6 +168,8 @@ class Agent:
                 "single_position_risk_pct cannot exceed total_premium_risk_pct")
         if build_target_risk_pct > scenario_risk_pct:
             raise ValueError("build_target_risk_pct cannot exceed scenario_risk_pct")
+        if sizing_posture not in prompt.SIZING_POSTURE_GUIDANCE:
+            raise ValueError(f"unknown sizing_posture: {sizing_posture}")
         self.robust_risk_pct = robust_risk_pct
         self.scenario_risk_pct = scenario_risk_pct
         self.single_position_risk_pct = single_position_risk_pct
@@ -174,6 +177,7 @@ class Agent:
         self.realised_loss_throttle_pct = realised_loss_throttle_pct
         self.aligned_direction_risk_pct = aligned_direction_risk_pct
         self.build_target_risk_pct = build_target_risk_pct
+        self.sizing_posture = sizing_posture
         # Execute-mode account and order lifecycle traffic uses Alpaca's official
         # CLI, satisfying the competition integration requirement. Market data and
         # contract metadata remain direct read-only API calls.
@@ -331,6 +335,8 @@ class Agent:
             "build_target_risk_pct": getattr(
                 self, "build_target_risk_pct",
                 prompt.DEFAULT_BUILD_TARGET_RISK_PCT),
+            "sizing_posture": getattr(
+                self, "sizing_posture", prompt.DEFAULT_SIZING_POSTURE),
         }
 
     def _capture_starting_equity(self, account: dict | None = None) -> None:
@@ -1111,6 +1117,7 @@ class Agent:
                         realised_loss_throttle_pct=self.realised_loss_throttle_pct,
                         aligned_direction_risk_pct=self.aligned_direction_risk_pct,
                         build_target_risk_pct=self.build_target_risk_pct,
+                        sizing_posture=self.sizing_posture,
                         model=f"{self.provider.spec.provider}/{self.provider.spec.model}",
                         expiries=self.expiries, streams=self.streams.status())
 
@@ -1958,6 +1965,9 @@ def main() -> None:
                     help="aligned direction-led position ceiling as an equity fraction")
     ap.add_argument("--build-target-risk-pct", type=float, default=0.035,
                     help="scenario-risk level below which periodic build reviews continue")
+    ap.add_argument("--sizing-posture", choices=["balanced", "high_variance"],
+                    default="balanced",
+                    help="model-facing sizing motivation; host gates remain authoritative")
     args = ap.parse_args()
 
     load_env()
@@ -1969,7 +1979,8 @@ def main() -> None:
         total_premium_risk_pct=args.total_premium_risk_pct,
         realised_loss_throttle_pct=args.realised_loss_throttle_pct,
         aligned_direction_risk_pct=args.aligned_direction_risk_pct,
-        build_target_risk_pct=args.build_target_risk_pct)
+        build_target_risk_pct=args.build_target_risk_pct,
+        sizing_posture=args.sizing_posture)
     if args.profile == "competition" and args.mode == "execute":
         print("!! competition account, execute mode -- orders will be real paper trades")
 

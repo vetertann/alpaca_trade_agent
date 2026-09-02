@@ -49,6 +49,9 @@ or directionally aligned position, permits 30% aggregate premium at risk, thrott
 new entries after 15% realised loss, and continues build reviews below 9% correlated
 scenario risk. These are ceilings, not forced allocations: quote, liquidity,
 economics, evidence, concentration, and resulting-book gates remain mandatory.
+The unit also selects the `high_variance` sizing posture, which tells the model to
+aim for 7–10% maximum-loss sizing when evidence is robust and to name a concrete
+reason when choosing less. The default posture remains `balanced`.
 
 ## Watching
 

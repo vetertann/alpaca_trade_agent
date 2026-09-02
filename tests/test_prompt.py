@@ -110,6 +110,7 @@ def test_aggressive_runtime_profile_is_rendered_as_one_coherent_policy():
         "realised_loss_throttle_pct": 0.15,
         "aligned_direction_risk_pct": 0.10,
         "build_target_risk_pct": 0.09,
+        "sizing_posture": "high_variance",
     }
     aggressive = prompt.system_prompt(**kwargs)
     assert "the 10% single-position cap" in aggressive
@@ -118,8 +119,16 @@ def test_aggressive_runtime_profile_is_rendered_as_one_coherent_policy():
     assert "aligned direction-led structure at **10% of equity**" in aggressive
     assert "scenario loss is below 9% of equity" in aggressive
     assert "min(risk_fraction, 0.1)" in aggressive
+    assert "normally 7–10% of equity" in aggressive
+    assert "former 4% profile" in aggressive
     assert "{{" not in aggressive
     assert prompt.prompt_version(**kwargs) != prompt.prompt_version()
+
+
+def test_balanced_prompt_does_not_receive_high_variance_motivation():
+    balanced = prompt.system_prompt()
+    assert "high-variance tournament" not in balanced
+    assert "normally 7–10% of equity" not in balanced
 
 
 def test_scenario_variant_is_rendered_everywhere_and_versioned():
