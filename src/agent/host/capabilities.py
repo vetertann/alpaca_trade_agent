@@ -885,27 +885,34 @@ class Capabilities:
                         "direction-led candidate conflicts with current host-observed "
                         "market direction; select an aligned or volatility-led structure")
                 elif (alignment in ("neutral", "insufficient_data")
-                      and budget_fraction > 0.0075):
+                      and budget_fraction
+                      > self.params.max_neutral_direction_risk_pct / 100.0):
                     issues.append(
                         "direction-led candidate without aligned market evidence must cap "
-                        "requested risk at 0.75% of equity")
-                elif alignment == "aligned" and budget_fraction > 0.03:
+                        "requested risk at "
+                        f"{self.params.max_neutral_direction_risk_pct:g}% of equity")
+                elif (alignment == "aligned" and budget_fraction
+                      > self.params.max_aligned_direction_risk_pct / 100.0):
                     issues.append(
-                        "aligned direction-led candidate must cap requested risk at 3% "
-                        "of equity")
+                        "aligned direction-led candidate must cap requested risk at "
+                        f"{self.params.max_aligned_direction_risk_pct:g}% of equity")
             elif directionality == "mixed":
                 if alignment == "conflicted":
                     issues.append(
                         "mixed candidate conflicts with current market direction; select "
                         "a non-conflicted or genuinely volatility-led structure")
                 elif (alignment in ("neutral", "insufficient_data")
-                      and budget_fraction > 0.0075):
+                      and budget_fraction
+                      > self.params.max_neutral_direction_risk_pct / 100.0):
                     issues.append(
                         "mixed candidate without aligned market evidence must cap requested "
-                        "risk at 0.75% of equity")
-                elif alignment == "aligned" and budget_fraction > 0.03:
+                        "risk at "
+                        f"{self.params.max_neutral_direction_risk_pct:g}% of equity")
+                elif (alignment == "aligned" and budget_fraction
+                      > self.params.max_aligned_direction_risk_pct / 100.0):
                     issues.append(
-                        "aligned mixed candidate must cap requested risk at 3% of equity")
+                        "aligned mixed candidate must cap requested risk at "
+                        f"{self.params.max_aligned_direction_risk_pct:g}% of equity")
 
         exit_at = str(getattr(thesis, "exit_at", "") or "")
         if not exit_at:

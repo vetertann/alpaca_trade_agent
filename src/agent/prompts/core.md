@@ -566,7 +566,7 @@ def discover():
         if direction["directional_alignment"] in ("neutral", "insufficient_data"):
             risk_fraction = min(risk_fraction, 0.0075)
         elif direction["directional_alignment"] == "aligned":
-            risk_fraction = min(risk_fraction, 0.03)
+            risk_fraction = min(risk_fraction, {{ALIGNED_DIRECTION_RISK_FRACTION}})
     dissent = [name for name, edge in chosen_eval["edge_by_measure"].items()
                if edge <= 0]
     is_long_premium = chosen["net_price"] > 0

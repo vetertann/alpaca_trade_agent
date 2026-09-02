@@ -37,6 +37,8 @@ class RiskParams:
     robust_evidence_risk_pct: float = 4.0
     supported_evidence_risk_pct: float = 1.5
     partial_evidence_risk_pct: float = 0.5
+    max_aligned_direction_risk_pct: float = 3.0
+    max_neutral_direction_risk_pct: float = 0.75
     scheduled_event_window_minutes: float = 90.0
     short_gamma_event_size_multiplier: float = 0.5
 

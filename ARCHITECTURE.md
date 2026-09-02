@@ -734,11 +734,11 @@ schema or install a new capability for future cycles.
 |---|---|---|
 | **Active-session startup** | Service starts or restarts while entries are allowed | once per process start |
 | **Session anchors** | 09:45 · 11:00 · 14:00 · 15:30 ET | 4 per session |
-| **Portfolio-build review** | Correlated scenario loss below 3.5%, operational capacity available, and no decision cycle for 20 minutes | as needed while qualified marginal opportunities remain |
+| **Portfolio-build review** | Correlated scenario loss below the runtime build target, operational capacity available, and no decision cycle for 20 minutes | as needed while qualified marginal opportunities remain |
 | **Underlying move** | Spot moves more than 0.5× the ATM-IV-implied daily move since the last cycle | 1–2 per session |
 | **Volatility shift** | `iv_rv_ratio` moves more than 10% relative since the last cycle | under 1 per session |
 | **Portfolio deterioration** | Equity or one structure deteriorates materially from the last decision baseline | as needed |
-| **Portfolio scenario breach** | Correlated executable stress first exceeds 4.0% of equity | rare, urgent |
+| **Portfolio scenario breach** | Correlated executable stress first exceeds the runtime scenario-risk ceiling | rare, urgent |
 | **Stop approach** | A short-premium structure crosses 50% progress toward its deterministic stop | rare, urgent |
 | **Breakeven cross** | Current expiry payoff crosses from profitable to unprofitable | as needed |
 | **Fill update** | A structure partially or completely fills, opening a new management question | 1+ per entry |

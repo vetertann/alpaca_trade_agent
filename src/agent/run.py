@@ -135,7 +135,12 @@ def _settlement_status(structure: dict, authorization: dict | None, *,
 class Agent:
     def __init__(self, profile_name: str, mode: str, dev_models: bool,
                  run_dir: str = ".run", robust_risk_pct: float = 0.04,
-                 scenario_risk_pct: float = 0.04):
+                 scenario_risk_pct: float = 0.04,
+                 single_position_risk_pct: float = 0.04,
+                 total_premium_risk_pct: float = 0.15,
+                 realised_loss_throttle_pct: float = 0.06,
+                 aligned_direction_risk_pct: float = 0.03,
+                 build_target_risk_pct: float = 0.035):
         self.run_dir = run_dir
         self.prof = profile(profile_name)
         self.profile_name = profile_name
@@ -144,8 +149,31 @@ class Agent:
             raise ValueError("robust_risk_pct must be in (0, 0.15]")
         if not 0 < scenario_risk_pct <= 0.25:
             raise ValueError("scenario_risk_pct must be in (0, 0.25]")
+        for label, value, limit in (
+                ("single_position_risk_pct", single_position_risk_pct, 0.25),
+                ("total_premium_risk_pct", total_premium_risk_pct, 0.60),
+                ("realised_loss_throttle_pct", realised_loss_throttle_pct, 0.25),
+                ("aligned_direction_risk_pct", aligned_direction_risk_pct, 0.15),
+                ("build_target_risk_pct", build_target_risk_pct, 0.25)):
+            if not 0 < value <= limit:
+                raise ValueError(f"{label} must be in (0, {limit}]")
+        if robust_risk_pct > single_position_risk_pct:
+            raise ValueError("robust_risk_pct cannot exceed single_position_risk_pct")
+        if aligned_direction_risk_pct > single_position_risk_pct:
+            raise ValueError(
+                "aligned_direction_risk_pct cannot exceed single_position_risk_pct")
+        if single_position_risk_pct > total_premium_risk_pct:
+            raise ValueError(
+                "single_position_risk_pct cannot exceed total_premium_risk_pct")
+        if build_target_risk_pct > scenario_risk_pct:
+            raise ValueError("build_target_risk_pct cannot exceed scenario_risk_pct")
         self.robust_risk_pct = robust_risk_pct
         self.scenario_risk_pct = scenario_risk_pct
+        self.single_position_risk_pct = single_position_risk_pct
+        self.total_premium_risk_pct = total_premium_risk_pct
+        self.realised_loss_throttle_pct = realised_loss_throttle_pct
+        self.aligned_direction_risk_pct = aligned_direction_risk_pct
+        self.build_target_risk_pct = build_target_risk_pct
         # Execute-mode account and order lifecycle traffic uses Alpaca's official
         # CLI, satisfying the competition integration requirement. Market data and
         # contract metadata remain direct read-only API calls.
@@ -158,7 +186,11 @@ class Agent:
         # executor ceiling; the two can no longer drift apart.
         self.params = replace(
             RISK, robust_evidence_risk_pct=robust_risk_pct * 100.0,
-            max_correlated_scenario_loss_pct=scenario_risk_pct * 100.0)
+            max_correlated_scenario_loss_pct=scenario_risk_pct * 100.0,
+            max_single_position_pct=single_position_risk_pct * 100.0,
+            max_total_premium_at_risk_pct=total_premium_risk_pct * 100.0,
+            realised_loss_throttle_pct=realised_loss_throttle_pct * 100.0,
+            max_aligned_direction_risk_pct=aligned_direction_risk_pct * 100.0)
         self.ledger = ExecutionLedger(f"{run_dir}/execution.jsonl")
         self.exit_policies = ExitPolicyStore(f"{run_dir}/exit_policies.jsonl")
         self.action_triggers = ActionTriggerStore(
@@ -279,7 +311,27 @@ class Agent:
             robust_risk_pct=getattr(
                 self, "robust_risk_pct", prompt.DEFAULT_ROBUST_RISK_PCT),
             scenario_risk_pct=getattr(
-                self, "scenario_risk_pct", prompt.DEFAULT_SCENARIO_RISK_PCT))
+                self, "scenario_risk_pct", prompt.DEFAULT_SCENARIO_RISK_PCT),
+            **self._prompt_risk_profile())
+
+    def _prompt_risk_profile(self) -> dict:
+        return {
+            "single_position_risk_pct": getattr(
+                self, "single_position_risk_pct",
+                prompt.DEFAULT_SINGLE_POSITION_RISK_PCT),
+            "total_premium_risk_pct": getattr(
+                self, "total_premium_risk_pct",
+                prompt.DEFAULT_TOTAL_PREMIUM_RISK_PCT),
+            "realised_loss_throttle_pct": getattr(
+                self, "realised_loss_throttle_pct",
+                prompt.DEFAULT_REALISED_LOSS_THROTTLE_PCT),
+            "aligned_direction_risk_pct": getattr(
+                self, "aligned_direction_risk_pct",
+                prompt.DEFAULT_ALIGNED_DIRECTION_RISK_PCT),
+            "build_target_risk_pct": getattr(
+                self, "build_target_risk_pct",
+                prompt.DEFAULT_BUILD_TARGET_RISK_PCT),
+        }
 
     def _capture_starting_equity(self, account: dict | None = None) -> None:
         if self.starting_equity is not None:
@@ -1054,6 +1106,11 @@ class Agent:
                         execution_transport=self.rest.execution_transport,
                         robust_risk_pct=self.robust_risk_pct,
                         scenario_risk_pct=self.scenario_risk_pct,
+                        single_position_risk_pct=self.single_position_risk_pct,
+                        total_premium_risk_pct=self.total_premium_risk_pct,
+                        realised_loss_throttle_pct=self.realised_loss_throttle_pct,
+                        aligned_direction_risk_pct=self.aligned_direction_risk_pct,
+                        build_target_risk_pct=self.build_target_risk_pct,
                         model=f"{self.provider.spec.provider}/{self.provider.spec.model}",
                         expiries=self.expiries, streams=self.streams.status())
 
@@ -1138,7 +1195,8 @@ class Agent:
             sys_prompt = prompt.system_blocks(
                 include_pretrade=bool(staged_checklist),
                 robust_risk_pct=robust_risk_pct,
-                scenario_risk_pct=scenario_risk_pct)
+                scenario_risk_pct=scenario_risk_pct,
+                **self._prompt_risk_profile())
             spec = self.provider.spec
             request_messages = list(messages)
             if rnd > 1:
@@ -1183,7 +1241,8 @@ class Agent:
                                prompt.prompt_version(
                                    include_pretrade=bool(staged_checklist),
                                    robust_risk_pct=robust_risk_pct,
-                                   scenario_risk_pct=scenario_risk_pct),
+                                   scenario_risk_pct=scenario_risk_pct,
+                                   **self._prompt_risk_profile()),
                                {"input": c.input_tokens, "output": c.output_tokens,
                                 "cached": c.cached_tokens,
                                 "cache_write": c.cache_write_tokens,
@@ -1847,6 +1906,7 @@ class Agent:
                         expected_daily_move=self._expected_daily_moves(universe),
                         structure_count=len(structures),
                         portfolio_risk_pct=portfolio_risk_pct,
+                        allocation_target_risk_pct=self.build_target_risk_pct,
                         portfolio_snapshot=portfolio_snapshot,
                         trading_day=trading_day)
                 # Defence in depth: no Tier-2 source (including startup and
@@ -1888,11 +1948,28 @@ def main() -> None:
                     help="maximum-loss fraction for a three-model stable entry")
     ap.add_argument("--scenario-risk-pct", type=float, default=0.04,
                     help="maximum correlated executable scenario loss as an equity fraction")
+    ap.add_argument("--single-position-risk-pct", type=float, default=0.04,
+                    help="maximum loss for one position as an equity fraction")
+    ap.add_argument("--total-premium-risk-pct", type=float, default=0.15,
+                    help="aggregate premium-at-risk ceiling as an equity fraction")
+    ap.add_argument("--realised-loss-throttle-pct", type=float, default=0.06,
+                    help="cumulative realised-loss entry throttle as an equity fraction")
+    ap.add_argument("--aligned-direction-risk-pct", type=float, default=0.03,
+                    help="aligned direction-led position ceiling as an equity fraction")
+    ap.add_argument("--build-target-risk-pct", type=float, default=0.035,
+                    help="scenario-risk level below which periodic build reviews continue")
     args = ap.parse_args()
 
     load_env()
-    agent = Agent(args.profile, args.mode, args.dev_models, args.run_dir,
-                  args.robust_risk_pct, args.scenario_risk_pct)
+    agent = Agent(
+        args.profile, args.mode, args.dev_models, args.run_dir,
+        robust_risk_pct=args.robust_risk_pct,
+        scenario_risk_pct=args.scenario_risk_pct,
+        single_position_risk_pct=args.single_position_risk_pct,
+        total_premium_risk_pct=args.total_premium_risk_pct,
+        realised_loss_throttle_pct=args.realised_loss_throttle_pct,
+        aligned_direction_risk_pct=args.aligned_direction_risk_pct,
+        build_target_risk_pct=args.build_target_risk_pct)
     if args.profile == "competition" and args.mode == "execute":
         print("!! competition account, execute mode -- orders will be real paper trades")
 

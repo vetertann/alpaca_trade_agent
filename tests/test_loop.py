@@ -116,6 +116,20 @@ def test_portfolio_build_ignores_arbitrary_four_but_stops_at_capacity_or_risk():
     ) is None
 
 
+def test_aggressive_profile_can_continue_build_reviews_above_balanced_target():
+    ts = loop.TriggerState()
+    ts.record_cycle(et(1, 12, 0), {"SPY": {"spot": 100.0}})
+    ts.last_anchor_fired = loop.ANCHORS[-1]
+    universe = {"SPY": {"spot": 100.0}}
+
+    trigger = ts.evaluate(
+        et(1, 12, 21), universe, [], structure_count=2,
+        portfolio_risk_pct=0.06, allocation_target_risk_pct=0.09)
+
+    assert trigger and trigger.name == "portfolio_build_review"
+    assert "9.0%" in trigger.detail
+
+
 def test_cycle_cap_stops_escalation():
     ts = loop.TriggerState()
     ts.cycles_this_session = loop.MAX_CYCLES_PER_SESSION

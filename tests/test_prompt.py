@@ -88,14 +88,38 @@ def test_prompt_uses_tournament_sizing_without_relaxing_evidence():
     assert "Do not add to,\naverage down" in s
 
 
-def test_risk_variant_changes_only_the_rendered_robust_ceiling():
-    aggressive = prompt.system_prompt(robust_risk_pct=0.10)
+def test_risk_variant_changes_the_rendered_robust_and_single_position_ceilings():
+    aggressive = prompt.system_prompt(
+        robust_risk_pct=0.10, single_position_risk_pct=0.10)
     assert "at most 10% of equity maximum loss" in aggressive
     assert "risk_fraction = (0.1 if robust else" in aggressive
     assert "at most **1.5%\nof equity**" in aggressive
     assert "cap requested risk at **0.75% of equity**" in aggressive
     assert "{{ROBUST_RISK" not in aggressive
-    assert prompt.prompt_version(robust_risk_pct=0.10) != prompt.prompt_version()
+    assert prompt.prompt_version(
+        robust_risk_pct=0.10,
+        single_position_risk_pct=0.10) != prompt.prompt_version()
+
+
+def test_aggressive_runtime_profile_is_rendered_as_one_coherent_policy():
+    kwargs = {
+        "robust_risk_pct": 0.10,
+        "scenario_risk_pct": 0.10,
+        "single_position_risk_pct": 0.10,
+        "total_premium_risk_pct": 0.30,
+        "realised_loss_throttle_pct": 0.15,
+        "aligned_direction_risk_pct": 0.10,
+        "build_target_risk_pct": 0.09,
+    }
+    aggressive = prompt.system_prompt(**kwargs)
+    assert "the 10% single-position cap" in aggressive
+    assert "the 30% portfolio" in aggressive
+    assert "losses pass 15% of equity" in aggressive
+    assert "aligned direction-led structure at **10% of equity**" in aggressive
+    assert "scenario loss is below 9% of equity" in aggressive
+    assert "min(risk_fraction, 0.1)" in aggressive
+    assert "{{" not in aggressive
+    assert prompt.prompt_version(**kwargs) != prompt.prompt_version()
 
 
 def test_scenario_variant_is_rendered_everywhere_and_versioned():

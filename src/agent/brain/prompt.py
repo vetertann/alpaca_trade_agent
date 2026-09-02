@@ -13,6 +13,11 @@ from pathlib import Path
 PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 DEFAULT_ROBUST_RISK_PCT = 0.04
 DEFAULT_SCENARIO_RISK_PCT = 0.04
+DEFAULT_SINGLE_POSITION_RISK_PCT = 0.04
+DEFAULT_TOTAL_PREMIUM_RISK_PCT = 0.15
+DEFAULT_REALISED_LOSS_THROTTLE_PCT = 0.06
+DEFAULT_ALIGNED_DIRECTION_RISK_PCT = 0.03
+DEFAULT_BUILD_TARGET_RISK_PCT = 0.035
 
 OUTPUT_CONTRACT = """# Output contract
 
@@ -33,44 +38,84 @@ OUTPUT_REMINDER = (
 
 @lru_cache(maxsize=48)
 def _layer(name: str, robust_risk_pct: float = DEFAULT_ROBUST_RISK_PCT,
-           scenario_risk_pct: float = DEFAULT_SCENARIO_RISK_PCT) -> str:
+           scenario_risk_pct: float = DEFAULT_SCENARIO_RISK_PCT,
+           single_position_risk_pct: float = DEFAULT_SINGLE_POSITION_RISK_PCT,
+           total_premium_risk_pct: float = DEFAULT_TOTAL_PREMIUM_RISK_PCT,
+           realised_loss_throttle_pct: float = DEFAULT_REALISED_LOSS_THROTTLE_PCT,
+           aligned_direction_risk_pct: float = DEFAULT_ALIGNED_DIRECTION_RISK_PCT,
+           build_target_risk_pct: float = DEFAULT_BUILD_TARGET_RISK_PCT) -> str:
     if not 0 < robust_risk_pct <= 0.15:
         raise ValueError("robust_risk_pct must be in (0, 0.15]")
     if not 0 < scenario_risk_pct <= 0.25:
         raise ValueError("scenario_risk_pct must be in (0, 0.25]")
+    for label, value, limit in (
+            ("single_position_risk_pct", single_position_risk_pct, 0.25),
+            ("total_premium_risk_pct", total_premium_risk_pct, 0.60),
+            ("realised_loss_throttle_pct", realised_loss_throttle_pct, 0.25),
+            ("aligned_direction_risk_pct", aligned_direction_risk_pct, 0.15),
+            ("build_target_risk_pct", build_target_risk_pct, 0.25)):
+        if not 0 < value <= limit:
+            raise ValueError(f"{label} must be in (0, {limit}]")
+    if robust_risk_pct > single_position_risk_pct:
+        raise ValueError("robust_risk_pct cannot exceed single_position_risk_pct")
+    if aligned_direction_risk_pct > single_position_risk_pct:
+        raise ValueError(
+            "aligned_direction_risk_pct cannot exceed single_position_risk_pct")
+    if single_position_risk_pct > total_premium_risk_pct:
+        raise ValueError(
+            "single_position_risk_pct cannot exceed total_premium_risk_pct")
+    if build_target_risk_pct > scenario_risk_pct:
+        raise ValueError("build_target_risk_pct cannot exceed scenario_risk_pct")
     percent = f"{robust_risk_pct * 100:g}%"
     fraction = f"{robust_risk_pct:g}"
     scenario_percent = f"{scenario_risk_pct * 100:g}%"
     return ((PROMPTS / f"{name}.md").read_text()
             .replace("{{ROBUST_RISK_PERCENT}}", percent)
             .replace("{{ROBUST_RISK_FRACTION}}", fraction)
-            .replace("{{SCENARIO_RISK_PERCENT}}", scenario_percent))
+            .replace("{{SCENARIO_RISK_PERCENT}}", scenario_percent)
+            .replace("{{SINGLE_POSITION_RISK_PERCENT}}",
+                     f"{single_position_risk_pct * 100:g}%")
+            .replace("{{TOTAL_PREMIUM_RISK_PERCENT}}",
+                     f"{total_premium_risk_pct * 100:g}%")
+            .replace("{{REALISED_LOSS_THROTTLE_PERCENT}}",
+                     f"{realised_loss_throttle_pct * 100:g}%")
+            .replace("{{ALIGNED_DIRECTION_RISK_PERCENT}}",
+                     f"{aligned_direction_risk_pct * 100:g}%")
+            .replace("{{ALIGNED_DIRECTION_RISK_FRACTION}}",
+                     f"{aligned_direction_risk_pct:g}")
+            .replace("{{BUILD_TARGET_RISK_PERCENT}}",
+                     f"{build_target_risk_pct * 100:g}%"))
 
 
 def system_prompt(*, include_pretrade: bool = False,
                   robust_risk_pct: float = DEFAULT_ROBUST_RISK_PCT,
-                  scenario_risk_pct: float = DEFAULT_SCENARIO_RISK_PCT) -> str:
+                  scenario_risk_pct: float = DEFAULT_SCENARIO_RISK_PCT,
+                  **risk_profile) -> str:
     """Put the response contract last so it has maximum instruction recency."""
-    parts = [_layer("core", robust_risk_pct, scenario_risk_pct),
-             _layer("domain", robust_risk_pct, scenario_risk_pct)]
+    parts = [_layer("core", robust_risk_pct, scenario_risk_pct, **risk_profile),
+             _layer("domain", robust_risk_pct, scenario_risk_pct, **risk_profile)]
     if include_pretrade:
-        parts.append(_layer("pretrade", robust_risk_pct, scenario_risk_pct))
+        parts.append(_layer("pretrade", robust_risk_pct, scenario_risk_pct,
+                            **risk_profile))
     parts.append(OUTPUT_CONTRACT)
     return "\n\n---\n\n".join(parts)
 
 
 def prompt_version(*, include_pretrade: bool = False,
                    robust_risk_pct: float = DEFAULT_ROBUST_RISK_PCT,
-                   scenario_risk_pct: float = DEFAULT_SCENARIO_RISK_PCT) -> str:
+                   scenario_risk_pct: float = DEFAULT_SCENARIO_RISK_PCT,
+                   **risk_profile) -> str:
     return hashlib.sha256(system_prompt(include_pretrade=include_pretrade,
                                         robust_risk_pct=robust_risk_pct,
-                                        scenario_risk_pct=scenario_risk_pct).encode()
+                                        scenario_risk_pct=scenario_risk_pct,
+                                        **risk_profile).encode()
                           ).hexdigest()[:12]
 
 
 def system_blocks(*, include_pretrade: bool = False,
                   robust_risk_pct: float = DEFAULT_ROBUST_RISK_PCT,
-                  scenario_risk_pct: float = DEFAULT_SCENARIO_RISK_PCT) -> list[dict]:
+                  scenario_risk_pct: float = DEFAULT_SCENARIO_RISK_PCT,
+                  **risk_profile) -> list[dict]:
     """System prompt as cacheable blocks.
 
     OpenAI-compatible providers cache the prefix themselves. Anthropic needs an
@@ -79,13 +124,13 @@ def system_blocks(*, include_pretrade: bool = False,
     separate block. The output contract is always the final block.
     """
     stable = "\n\n---\n\n".join([
-        _layer("core", robust_risk_pct, scenario_risk_pct),
-        _layer("domain", robust_risk_pct, scenario_risk_pct)])
+        _layer("core", robust_risk_pct, scenario_risk_pct, **risk_profile),
+        _layer("domain", robust_risk_pct, scenario_risk_pct, **risk_profile)])
     blocks = [{"type": "text", "text": stable,
                "cache_control": {"type": "ephemeral"}}]
     if include_pretrade:
         blocks.append({"type": "text", "text": _layer(
-            "pretrade", robust_risk_pct, scenario_risk_pct),
+            "pretrade", robust_risk_pct, scenario_risk_pct, **risk_profile),
                        "cache_control": {"type": "ephemeral"}})
     blocks.append({"type": "text", "text": OUTPUT_CONTRACT})
     return blocks

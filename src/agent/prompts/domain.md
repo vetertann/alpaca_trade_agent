@@ -142,13 +142,13 @@ not independently predict whether SPY or QQQ rises. A vertical whose spot is alr
 on the expiry-loss side of its breakeven is an immediate directional bet even when
 all three distribution evaluations show positive expected value. Normal size is
 permitted only when the directional component has separate, current evidence and a
-written invalidation; even then, cap an aligned direction-led structure at **3% of equity**.
+written invalidation; even then, cap an aligned direction-led structure at **{{ALIGNED_DIRECTION_RISK_PERCENT}} of equity**.
 Without that evidence, reject it or cap requested risk at **0.75% of equity**. Do not
 disguise directional exposure by calling a credit spread a volatility trade.
 
 The host rejects a direction-led structure that conflicts with current observed
 direction. It caps a direction-led structure with neutral or insufficient evidence
-at 0.75% of equity, and caps an aligned direction-led structure at 3%. The same
+at 0.75% of equity, and caps an aligned direction-led structure at {{ALIGNED_DIRECTION_RISK_PERCENT}}. The same
 limits apply to mixed structures, and a materially conflicted mixed structure is
 rejected. A genuinely volatility-led, near-delta-neutral structure has **no tape-
 alignment size cap**: its ensemble tier, short-gamma cluster gate and resulting-book
@@ -185,7 +185,7 @@ generated `risk_budget` cannot override it.
 
 `risk_budget` is what you are willing to lose on the position. The host converts it
 to a quantity against the real per-unit maximum loss. It selects the smallest
-headroom across the requested budget, the 4% single-position cap, the 15% portfolio
+headroom across the requested budget, the {{SINGLE_POSITION_RISK_PERCENT}} single-position cap, the {{TOTAL_PREMIUM_RISK_PERCENT}} portfolio
 cap, buying power, evidence tier, and the **resulting correlated-book scenario
 limit**, then recomputes all economics at that final quantity. The scenario grid
 moves SPY/QQQ/IWM together by −1/−0.5/0/+0.5/+1 expected moves, applies unchanged
@@ -196,14 +196,14 @@ current book is already breached, only a quantity inside the exact feasible inte
 that reduces the binding loss can pass. Deployment is the control on long premium
 because maximum loss is bounded at entry.
 
-Once cumulative realised losses pass 6% of equity the host stops accepting new
+Once cumulative realised losses pass {{REALISED_LOSS_THROTTLE_PERCENT}} of equity the host stops accepting new
 entries. Open positions are never liquidated to satisfy that.
 
 # Initial allocation
 
 The portfolio is constructed sequentially because each cycle may verify and submit
 only one structure. There is no structure-count allocation target. While correlated
-scenario loss is below 3.5% of equity and the eight-structure operational capacity
+scenario loss is below {{BUILD_TARGET_RISK_PERCENT}} of equity and the eight-structure operational capacity
 has room, a portfolio-build review fires every 20 minutes. A new structure must
 improve the book or add a meaningfully different payoff; never add exposure merely
 to consume the risk budget. No more than three structures may share one underlying,

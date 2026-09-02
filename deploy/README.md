@@ -39,10 +39,16 @@ stream owner, so the live service remains the sole long-lived process.
 
 | Role | Unit | Directory | Arguments | Panel |
 |---|---|---|---|---|
-| judged competition account | `alpaca-agent.service` | `/opt/alpaca-agent` | competition, execute, 4% robust/scenario risk | `alpaca-panel.service`, 3001 |
+| judged competition account | `alpaca-agent.service` | `/opt/alpaca-agent` | competition, execute, high-variance tournament profile | `alpaca-panel.service`, 3001 |
 
 The agent and panel are separate services. The panel reads the run directory only
 and has no broker action path.
+
+The high-variance profile makes 10% of equity maximum loss available to a robust
+or directionally aligned position, permits 30% aggregate premium at risk, throttles
+new entries after 15% realised loss, and continues build reviews below 9% correlated
+scenario risk. These are ceilings, not forced allocations: quote, liquidity,
+economics, evidence, concentration, and resulting-book gates remain mandatory.
 
 ## Watching
 

@@ -109,6 +109,7 @@ class TriggerState:
                  expected_daily_move: dict | None = None,
                  structure_count: int | None = None,
                  portfolio_risk_pct: float = 0.0,
+                 allocation_target_risk_pct: float = INITIAL_ALLOCATION_TARGET_RISK_PCT,
                  portfolio_snapshot: dict | None = None,
                  trading_day: bool = True) -> Trigger | None:
         if session_state(now_et, trading_day) == "CLOSED":
@@ -246,13 +247,13 @@ class TriggerState:
         count = len(book) if structure_count is None else structure_count
         allocation_needed = (
             count < INITIAL_ALLOCATION_CAPACITY
-            and portfolio_risk_pct < INITIAL_ALLOCATION_TARGET_RISK_PCT)
+            and portfolio_risk_pct < allocation_target_risk_pct)
         if (allocation_needed and self.last_cycle_at is not None
                 and (now_et - self.last_cycle_at).total_seconds() >= FLAT_REVIEW_SECONDS):
             return Trigger(
                 "portfolio_build_review",
                 f"portfolio scenario risk remains below "
-                f"{INITIAL_ALLOCATION_TARGET_RISK_PCT:.1%} with capacity available "
+                f"{allocation_target_risk_pct:.1%} with capacity available "
                 "and has not been reviewed for 20 minutes")
         return None
 

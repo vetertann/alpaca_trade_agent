@@ -114,9 +114,9 @@ forced one-lot floor.
 together over −1/−0.5/0/+0.5/+1 expected moves and unchanged/+20% IV. Existing
 positions start from their executable close value, a candidate starts from its
 executable entry value, and observed per-leg half-spreads remain in the scenario
-close. The resulting book may lose at most 4.0% of equity on that grid. Chronological
-replay still records 1.50% as the smallest historical anchor; 4.0% is the explicit
-balanced contest policy, not an estimated optimum. Quantity is
+close. The balanced default permits 4.0% of equity on that grid. Chronological
+replay still records 1.50% as the smallest historical anchor; the configured value
+is an explicit tournament policy, not an estimated optimum. Quantity is
 solved exactly across every scenario, including the lower-bound case where a
 risk-reducing candidate repairs a book already over the limit. Missing inputs fail
 closed. A live breach freezes risk-increasing entries, keeps exits and repairing
@@ -130,7 +130,8 @@ midpoints. `market.directional_context()` exposes the labelled ingredients;
 `risk.direction()` joins them to candidate bias, breakevens, expected-move P&L
 scenarios, and the resulting book delta. A direction-led candidate that conflicts
 with the observed path is refused. Neutral or insufficient evidence is capped at
-0.75% risk; aligned directional exposure is capped at 3%. The same limits apply to
+0.75% risk; aligned directional exposure is capped at the configured host ceiling
+(3% in the balanced default). The same limits apply to
 mixed structures, while genuinely volatility-led, near-delta-neutral structures are
 controlled by ensemble, scenario and concentration gates instead of a tape cap. This
 is a contradiction guard, not a command to chase momentum, and it never labels
@@ -155,7 +156,8 @@ expiration. Matching their method keeps our risk model aligned with buying power
 **Tiered loop.** Tier 0 consumes four websocket streams and evaluates exits with no
 model involvement. Tier 1 tests numeric predicates. Tier 2 — the expensive part —
 runs on active-session startup, every 20 minutes while correlated scenario risk is
-below 3.5% and operational capacity remains, four session anchors,
+below the configured build target (3.5% in the balanced default) and operational
+capacity remains, four session anchors,
 or a live price, volatility, portfolio-P&L, stop-approach, fill, assignment, or
 relevant-news event. Tier 0 records normalized structure marks and executable close
 values every ten seconds. Ordinary market events are debounced at five minutes;

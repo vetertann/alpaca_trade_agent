@@ -1,4 +1,5 @@
 import datetime as dt
+from dataclasses import replace
 import httpx
 import pytest
 from agent.config import ET
@@ -666,6 +667,25 @@ def test_presubmit_caps_unconfirmed_directional_risk_at_three_quarter_percent(tm
     assert out["status"] == "needs_revision"
     assert any("0.75%" in issue for issue in out["issues"])
     assert ex.latest_staged is None
+
+
+def test_aggressive_profile_raises_only_the_aligned_direction_ceiling(tmp_path):
+    caps, _, intent, candidate, signature = audited_caps(tmp_path)
+    caps.params = replace(RP, max_aligned_direction_risk_pct=10.0,
+                          max_single_position_pct=10.0)
+    intent = TradeIntent(intent.underlying, intent.family, intent.legs,
+                         intent.thesis_id, 9_000.0)
+    caps._direction_checked.append({
+        "candidate": candidate.id, "signature": signature,
+        "sigma": 0.1, "days": 2.0,
+        "result": {"directionality": "direction-led",
+                   "directional_alignment": "aligned"},
+    })
+
+    issues = caps._thesis_policy_issues(intent, candidate.id)
+
+    assert not any("aligned direction-led candidate must cap" in issue
+                   for issue in issues)
 
 
 def test_presubmit_does_not_tape_cap_genuinely_volatility_led_candidate(tmp_path):
