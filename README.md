@@ -247,7 +247,7 @@ scripts/
   calibrate.py       live spread and volatility-state measurement
   estimate_cost.py   token and cost projection from measured usage
 deploy/              systemd unit, provisioning, deploy script
-tests/               484 passing tests
+tests/               485 passing tests
 ```
 
 Design detail lives in `ARCHITECTURE.md`. Operating procedure lives in `RUNBOOK.md`.

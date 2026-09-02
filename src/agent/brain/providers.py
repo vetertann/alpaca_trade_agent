@@ -235,8 +235,11 @@ class ChainProvider:
                  timeout_s: float = 70.0):
         if not specs:
             raise RuntimeError("empty provider chain")
-        self.providers = [Provider(s, max_tokens=max_tokens,
-                                   request_timeout_s=timeout_s) for s in specs]
+        self.providers = [Provider(
+            s, max_tokens=max_tokens,
+            request_timeout_s=(s.request_timeout_s
+                               if s.request_timeout_s is not None else timeout_s))
+            for s in specs]
         self.timeout_s = timeout_s
         self.fallbacks: list[str] = []
 
@@ -250,7 +253,7 @@ class ChainProvider:
         for i, prov in enumerate(self.providers):
             label = f"{prov.spec.provider}/{prov.spec.model}"
             try:
-                with _deadline(self.timeout_s):
+                with _deadline(getattr(prov, "request_timeout_s", self.timeout_s)):
                     # Every provider gets its own full repair budget. Why the
                     # previous one failed says nothing about whether this one can
                     # be talked into a valid program.

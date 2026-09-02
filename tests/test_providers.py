@@ -120,3 +120,11 @@ def test_chain_passes_request_timeout_to_each_provider():
         [ModelSpec("test", "a", "A"), ModelSpec("test", "b", "B")],
         timeout_s=17.0)
     assert [provider.request_timeout_s for provider in chain.providers] == [17.0, 17.0]
+
+
+def test_model_specific_timeout_overrides_chain_default():
+    chain = ChainProvider(
+        [ModelSpec("nebius", "slow", "KEY", request_timeout_s=150.0),
+         ModelSpec("openai", "normal", "KEY")],
+        timeout_s=70.0)
+    assert [provider.request_timeout_s for provider in chain.providers] == [150.0, 70.0]

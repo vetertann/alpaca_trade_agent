@@ -1214,7 +1214,7 @@ fallbacks remain available for provider-specific outages.
 |---|---|
 | API exception — connection, 5xx | fall through immediately |
 | Rate limit, quota, overloaded, auth — `429`, `529`, `insufficient_quota` | fall through, and skip the repair budget on the next provider since retrying a rate limit wastes the cycle |
-| Timeout — 70s SDK request bound on one call | fall through; retries are disabled and a hung provider cannot hold the decision path indefinitely |
+| Timeout — 70s SDK request bound normally; 150s for measured-slow Kimi | fall through; retries are disabled and a hung provider cannot hold the decision path indefinitely |
 | Malformed output — no valid `{thought, code}`, or `code` that does not parse as Python | **regenerate on the same model first**: one attempt plus three typed repairs, then fall through |
 
 The last one is structural rather than cosmetic. `code` is checked with `ast.parse` before the completion is accepted, so a model that returns a description of a program instead of a program is treated as not having answered, rather than costing a sandbox round to discover.
@@ -1261,7 +1261,9 @@ Each model was given the actual system prompt and asked for a `{thought, code}` 
 **Effort is a real lever on Anthropic.** Dropping `claude-opus-5` from default to `effort: "low"` halved both latency and output tokens, produced no thinking block, and still returned a valid contract with comparable code length. Worth using for routine cycles and reserving default effort for cycles that actually stage an order.
 
 The live trace showed why an SDK timeout is still necessary: Kimi's two successful
-full programs averaged 92.1 seconds and one took 129 seconds. The former signal
+full programs averaged 92.1 seconds and one took 129 seconds. Kimi therefore has
+a measured provider-specific 150-second ceiling; applying the ordinary 70-second
+limit would reject a valid fallback. The former signal
 deadline was inactive because cycles execute in a worker thread. Provider clients
 now use explicit request timeouts with SDK retries disabled; deterministic exits
 remain independent of all model calls.
@@ -1368,7 +1370,7 @@ helper is a no-op when disabled, so telemetry can never break trading.
 
 ## 15. Build status
 
-Implemented and verified. **484 tests.**
+Implemented and verified. **485 tests.**
 
 | Component | Module | State |
 |---|---|---|

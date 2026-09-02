@@ -17,6 +17,7 @@ class ModelSpec:
     key_name: str
     base_url: str | None = None
     params: dict = field(default_factory=dict)
+    request_timeout_s: float | None = None
 
     def available(self) -> bool:
         return bool(get_key(self.key_name, required=False))
@@ -43,7 +44,8 @@ GPT_55      = ModelSpec("openai", "gpt-5.5",       "OPENAI_API_KEY")
 GPT_54      = ModelSpec("openai", "gpt-5.4",       "OPENAI_API_KEY")
 GPT_54_MINI = ModelSpec("openai", "gpt-5.4-mini",  "OPENAI_API_KEY")
 GPT_OSS     = ModelSpec("nebius", "openai/gpt-oss-120b",     "NEBIUS_API_KEY", NEBIUS)
-KIMI_K3     = ModelSpec("nebius", "moonshotai/Kimi-K3",      "NEBIUS_API_KEY", NEBIUS)
+KIMI_K3     = ModelSpec("nebius", "moonshotai/Kimi-K3",      "NEBIUS_API_KEY", NEBIUS,
+                        request_timeout_s=150.0)
 QWEN_397B   = ModelSpec("nebius", "Qwen/Qwen3.5-397B-A17B",  "NEBIUS_API_KEY", NEBIUS)
 
 # zai-org/GLM-5.2 is deliberately absent from every chain: given an 8000-token
