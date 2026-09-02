@@ -47,6 +47,10 @@ class RunResult:
 
 
 HINTS = {
+    "SandboxTimeout": "The generated program exceeded its wall-clock budget. "
+                      "Do not rerun the same scan. Reuse persisted compact state, "
+                      "reduce candidate count or evaluation groups, and batch "
+                      "capability calls.",
     "NameError": "The name is not defined. Capability namespaces available: "
                  "market, options, account, orders, vol, oi_gamma, risk, trading, "
                  "thesis, decision, replay, learned. Do not rebind them.",
@@ -177,6 +181,10 @@ class Sandbox:
                 proc.kill()
                 out, err = proc.communicate()
                 timed_out = True
+                timeout_detail = (
+                    f"SandboxTimeout: generated program exceeded "
+                    f"{self.timeout_s:g} seconds")
+                err = (err.rstrip() + "\n" + timeout_detail + "\n").lstrip()
             ok = proc.returncode == 0 and not timed_out
         finally:
             stop.set()

@@ -31,6 +31,14 @@ def test_evidence_keeps_the_latest_sixteen_thousand_characters(tmp_path):
     assert rec["stdout"] == "b" * 16000
 
 
+def test_evidence_records_explicit_timeout_state(tmp_path):
+    t = Trace(tmp_path / "trace.jsonl")
+    t.start_cycle({}, "h")
+    t.evidence("", [], False, 90.1, "SandboxTimeout", timed_out=True)
+    rec = [r for r in t.records() if r["kind"] == "EVIDENCE"][0]
+    assert rec["timed_out"] is True
+
+
 def test_cycles_group(tmp_path):
     t = Trace(tmp_path / "trace.jsonl")
     a = t.start_cycle({}, "h"); t.outcome("NO_TRADE")

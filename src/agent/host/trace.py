@@ -47,10 +47,11 @@ class Trace:
                     usage=usage, latency_s=latency_s)
 
     def evidence(self, stdout: str, calls: list[dict], ok: bool, duration_s: float,
-                 stderr: str = "", state_manifest: dict | None = None) -> None:
+                 stderr: str = "", state_manifest: dict | None = None,
+                 timed_out: bool = False) -> None:
         self._write("EVIDENCE", stdout=stdout[-16000:], calls=calls, ok=ok,
                     duration_s=duration_s, stderr=stderr[-4000:] if stderr else "",
-                    state_manifest=state_manifest or {})
+                    timed_out=bool(timed_out), state_manifest=state_manifest or {})
 
     def verification(self, checklist: str, passed: bool) -> None:
         self._write("VERIFICATION", checklist=checklist, passed=passed)

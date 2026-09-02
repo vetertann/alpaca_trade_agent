@@ -103,6 +103,28 @@ def test_timeout_is_enforced(tmp_path):
     sb = Sandbox(dispatch, workdir=tmp_path, timeout_s=2.0)
     r = sb.run("while True:\n    pass", {})
     assert r.timed_out and not r.ok
+    assert "SandboxTimeout: generated program exceeded 2 seconds" in r.stderr
+    assert "reduce candidate count" in hint_for(r.stderr)
+
+
+def test_large_rpc_result_is_read_in_buffered_blocks(tmp_path):
+    # Comparable to a broad options.enumerate result.  The old unbuffered
+    # readline performed one socket read per byte and could consume the entire
+    # program budget after the host capability had already returned.
+    rows = [{"id": f"candidate-{i}", "detail": "x" * 4096}
+            for i in range(1000)]
+
+    def large_dispatch(ns, fn, args, kwargs):
+        assert (ns, fn) == ("options", "large_scan")
+        return {"candidates": rows}
+
+    large = Sandbox(large_dispatch, workdir=tmp_path, timeout_s=5.0)
+    r = large.run(
+        "result = options.large_scan()\n"
+        "print(len(result['candidates']), result['candidates'][-1]['id'])", {})
+
+    assert r.ok, r.stderr
+    assert r.stdout.strip() == "1000 candidate-999"
 
 
 def test_namespace_persists_across_rounds(sb):

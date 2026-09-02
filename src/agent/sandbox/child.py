@@ -15,7 +15,9 @@ from types import ModuleType
 from agent.sandbox.protocol import RpcError, call_frame, decode, encode
 
 _RPC_FD = int(os.environ.get("AGENT_RPC_FD", "3"))
-_rpc_in = os.fdopen(_RPC_FD, "rb", 0)
+# Broad scans return large JSON frames.  An unbuffered FileIO.readline() reads
+# those frames a byte at a time, turning a completed host call into a long stall.
+_rpc_in = os.fdopen(_RPC_FD, "rb", buffering=64 * 1024)
 _rpc_out = os.fdopen(os.dup(_RPC_FD), "wb", 0)
 
 

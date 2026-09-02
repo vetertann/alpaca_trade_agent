@@ -1278,7 +1278,7 @@ class Agent:
                     telemetry.record_error(prog_span, RuntimeError(
                         r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "failed"))
             self.trace.evidence(r.stdout, r.calls, r.ok, r.duration_s, r.stderr,
-                                r.state_manifest)
+                                r.state_manifest, timed_out=r.timed_out)
             last_stderr = r.stderr
             messages_tool_result = telemetry.tool_response_message(
                 call_id, {"ok": r.ok, "stdout": r.stdout[-2000:], "calls": len(r.calls)})
