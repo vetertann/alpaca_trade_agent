@@ -34,6 +34,7 @@ class Completion:
     cache_write_tokens: int = 0
     reasoning: str = ""
     reasoning_tokens: int = 0
+    attempts: int = 1
     fallbacks: list = field(default_factory=list)
     error: str | None = None
 
@@ -109,9 +110,11 @@ REPAIR = ("Your last reply did not satisfy the output contract ({error}).\n\n"
 
 
 class Provider:
-    def __init__(self, spec: ModelSpec, max_tokens: int = 8000):
+    def __init__(self, spec: ModelSpec, max_tokens: int = 8000,
+                 request_timeout_s: float = 70.0):
         self.spec = spec
         self.max_tokens = max_tokens
+        self.request_timeout_s = request_timeout_s
         self._client = None
         self._key: str | None = None
 
@@ -127,11 +130,14 @@ class Provider:
     def _anthropic(self, system, messages: list[dict]) -> tuple[str, dict]:
         import anthropic
         if self._client is None:
-            self._client = anthropic.Anthropic(api_key=self.key)
-        with self._client.messages.stream(
-                model=self.spec.model, max_tokens=self.max_tokens, system=system,
-                messages=messages, **self.spec.params) as stream:
-            msg = stream.get_final_message()
+            self._client = anthropic.Anthropic(
+                api_key=self.key, timeout=self.request_timeout_s, max_retries=0)
+        # Non-streaming makes the SDK read timeout a real whole-response bound.
+        # The old signal deadline is unavailable in the worker thread where live
+        # cycles run, while a stream can keep a per-read timer alive indefinitely.
+        msg = self._client.messages.create(
+            model=self.spec.model, max_tokens=self.max_tokens, system=system,
+            messages=messages, timeout=self.request_timeout_s, **self.spec.params)
         text = "".join(b.text for b in msg.content if b.type == "text")
         # thinking blocks are the provider's reasoning; keep them separate from text
         reasoning = "".join(getattr(b, "thinking", "") or ""
@@ -150,14 +156,17 @@ class Provider:
             system = "\n\n".join(b["text"] for b in system)
         from openai import OpenAI
         if self._client is None:
-            self._client = OpenAI(api_key=self.key, base_url=self.spec.base_url)
+            self._client = OpenAI(
+                api_key=self.key, base_url=self.spec.base_url,
+                timeout=self.request_timeout_s, max_retries=0)
         kw = {"model": self.spec.model,
               "messages": [{"role": "system", "content": system}, *messages]}
         # OpenAI's newer models take max_completion_tokens; others take max_tokens.
         kw["max_completion_tokens" if self.spec.provider == "openai" else "max_tokens"] = \
             self.max_tokens
         kw |= self.spec.params
-        r = self._client.chat.completions.create(**kw)
+        r = self._client.chat.completions.create(
+            **kw, timeout=self.request_timeout_s)
         u = r.usage
         cached = 0
         if u and getattr(u, "prompt_tokens_details", None):
@@ -184,21 +193,30 @@ class Provider:
         """
         convo = list(messages)
         last_error = None
+        totals = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
+                  "cache_write_tokens": 0, "reasoning_tokens": 0}
+        total_latency = 0.0
         for attempt in range(repairs + 1):
             t0 = time.monotonic()
             call = (self._anthropic if self.spec.provider == "anthropic"
                     else self._openai_compatible)
             text, usage = call(system, convo)
             dt_s = round(time.monotonic() - t0, 2)
+            total_latency += dt_s
+            for key in totals:
+                totals[key] += int(usage.get(key) or 0)
+            aggregate = {**usage, **totals}
             try:
                 thought, code = parse_contract(text)
                 return Completion(thought, code, text, self.spec.provider,
-                                  self.spec.model, dt_s, **usage)
+                                  self.spec.model, round(total_latency, 2),
+                                  **aggregate, attempts=attempt + 1)
             except ContractError as exc:
                 last_error = str(exc)
                 if attempt == repairs:
                     return Completion("", "", text, self.spec.provider, self.spec.model,
-                                      dt_s, **usage, error=last_error)
+                                      round(total_latency, 2), **aggregate,
+                                      attempts=attempt + 1, error=last_error)
                 convo = convo + [{"role": "assistant", "content": text or "(empty)"},
                                  {"role": "user", "content": REPAIR.format(error=last_error)}]
         raise AssertionError("unreachable")
@@ -217,7 +235,8 @@ class ChainProvider:
                  timeout_s: float = 70.0):
         if not specs:
             raise RuntimeError("empty provider chain")
-        self.providers = [Provider(s, max_tokens=max_tokens) for s in specs]
+        self.providers = [Provider(s, max_tokens=max_tokens,
+                                   request_timeout_s=timeout_s) for s in specs]
         self.timeout_s = timeout_s
         self.fallbacks: list[str] = []
 

@@ -1,5 +1,7 @@
 import json
 import pytest
+from agent.brain.models import ModelSpec
+from agent.brain.providers import ChainProvider, Provider
 from agent.brain.providers import ContractError, parse_contract
 
 
@@ -86,3 +88,35 @@ def test_ordinary_failures_are_not_terminal():
     from agent.brain.providers import is_terminal
     assert not is_terminal(ValueError("connection reset"))
     assert not is_terminal(TimeoutError("provider exceeded 70s"))
+
+
+def test_repair_attempt_usage_is_aggregated(monkeypatch):
+    provider = Provider(ModelSpec("test", "model", "TEST_KEY"))
+    replies = iter([
+        ("not json", {"input_tokens": 100, "output_tokens": 20,
+                      "cached_tokens": 5, "cache_write_tokens": 0,
+                      "reasoning": "", "reasoning_tokens": 3}),
+        ('{"thought":"ok","code":"print(1)"}',
+         {"input_tokens": 120, "output_tokens": 30,
+          "cached_tokens": 7, "cache_write_tokens": 2,
+          "reasoning": "final", "reasoning_tokens": 4}),
+    ])
+    monkeypatch.setattr(provider, "_openai_compatible",
+                        lambda system, messages: next(replies))
+
+    completion = provider.complete("system", [], repairs=1)
+
+    assert completion.attempts == 2
+    assert completion.input_tokens == 220
+    assert completion.output_tokens == 50
+    assert completion.cached_tokens == 12
+    assert completion.cache_write_tokens == 2
+    assert completion.reasoning_tokens == 7
+    assert completion.reasoning == "final"
+
+
+def test_chain_passes_request_timeout_to_each_provider():
+    chain = ChainProvider(
+        [ModelSpec("test", "a", "A"), ModelSpec("test", "b", "B")],
+        timeout_s=17.0)
+    assert [provider.request_timeout_s for provider in chain.providers] == [17.0, 17.0]

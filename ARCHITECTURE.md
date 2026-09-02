@@ -1200,11 +1200,13 @@ Each role names a provider, a model, and a fallback chain.
 
 | Role | Work | Default | Falls back to |
 |---|---|---|---|
-| **Decision** | Program generation and reasoning. Low frequency, high capability. | Anthropic `claude-opus-5` | Nebius `moonshotai/Kimi-K3` → OpenAI `gpt-5.5` → Nebius `openai/gpt-oss-120b` |
+| **Decision** | Program generation and reasoning. Low frequency, high capability. | OpenAI `gpt-5.6-sol` · medium reasoning | Anthropic `claude-opus-5` → Nebius `moonshotai/Kimi-K3` → Nebius `openai/gpt-oss-120b` |
 | **Triage** | News salience. High frequency, narrow, cheap. | Nebius `openai/gpt-oss-120b`, moving to Featherless when its key lands | Anthropic `claude-haiku-4-5` |
 | **Critic** | Optional falsification pass on a staged intent. | OpenAI `gpt-5.4` | Anthropic `claude-sonnet-5` |
 
-Kimi sits directly behind Opus because it is the only fallback proven against the real `{thought, code}` contract across full cycles; the others were verified on a toy prompt.
+GPT-5.6 Sol became primary after passing the same `{thought, code}` and Python-AST
+adapter contract locally at both low and medium reasoning. The heterogeneous
+fallbacks remain available for provider-specific outages.
 
 **Four ways a provider stops answering**, all of which fall through to the next model:
 
@@ -1212,12 +1214,12 @@ Kimi sits directly behind Opus because it is the only fallback proven against th
 |---|---|
 | API exception — connection, 5xx | fall through immediately |
 | Rate limit, quota, overloaded, auth — `429`, `529`, `insufficient_quota` | fall through, and skip the repair budget on the next provider since retrying a rate limit wastes the cycle |
-| Timeout — 70s wall clock on one call | fall through; a hung provider cannot eat the 90s cycle budget |
+| Timeout — 70s SDK request bound on one call | fall through; retries are disabled and a hung provider cannot hold the decision path indefinitely |
 | Malformed output — no valid `{thought, code}`, or `code` that does not parse as Python | **regenerate on the same model first**: one attempt plus three typed repairs, then fall through |
 
 The last one is structural rather than cosmetic. `code` is checked with `ast.parse` before the completion is accepted, so a model that returns a description of a program instead of a program is treated as not having answered, rather than costing a sandbox round to discover.
 
-**A malformed reply earns a regeneration cycle before the chain gives up on it** — one attempt plus three typed repairs naming the specific fault on the same model. Measured: Kimi given a deliberately loose system prompt returned prose at `repairs=0` and a valid program once repairs were allowed. Every provider gets its own full budget; why the previous one failed says nothing about whether this one can be talked into compliance.
+**A malformed reply earns a regeneration cycle before the chain gives up on it** — one attempt plus three typed repairs naming the specific fault on the same model. Measured: Kimi given a deliberately loose system prompt returned prose at `repairs=0` and a valid program once repairs were allowed. Every provider gets its own full budget; why the previous one failed says nothing about whether this one can be talked into compliance. Usage and latency are accumulated across those repairs instead of reporting only the final attempt.
 
 When the whole chain is exhausted the cycle terminates `ERROR` and the trace carries one record naming every model tried and why each failed, which renders in the panel's decision stream.
 
@@ -1250,6 +1252,7 @@ Each model was given the actual system prompt and asked for a `{thought, code}` 
 | `claude-sonnet-5` | 4.7 s | 383 | OK | |
 | `claude-opus-5` · effort `low` | 10.0 s | 952 | OK | no thinking block emitted |
 | `gpt-5.5` | 11.6 s | 1124 | OK | |
+| `gpt-5.6-sol` · medium | 3.5 s | 114 | OK | small adapter smoke; not directly comparable to the full-contract rows |
 | `claude-opus-5` · default effort | 19.4 s | 1836 | OK | one thinking block |
 | `zai-org/GLM-5.2` (Nebius) | 35.5 s | **8000, capped** | **empty** | see below |
 
@@ -1257,7 +1260,11 @@ Each model was given the actual system prompt and asked for a `{thought, code}` 
 
 **Effort is a real lever on Anthropic.** Dropping `claude-opus-5` from default to `effort: "low"` halved both latency and output tokens, produced no thinking block, and still returned a valid contract with comparable code length. Worth using for routine cycles and reserving default effort for cycles that actually stage an order.
 
-The 90-second cycle budget accommodates every model above, so capability rather than latency drives the decision role.
+The live trace showed why an SDK timeout is still necessary: Kimi's two successful
+full programs averaged 92.1 seconds and one took 129 seconds. The former signal
+deadline was inactive because cycles execute in a worker thread. Provider clients
+now use explicit request timeouts with SDK retries disabled; deterministic exits
+remain independent of all model calls.
 
 ### Differences that bite
 
@@ -1361,7 +1368,7 @@ helper is a no-op when disabled, so telemetry can never break trading.
 
 ## 15. Build status
 
-Implemented and verified. **481 tests.**
+Implemented and verified. **484 tests.**
 
 | Component | Module | State |
 |---|---|---|

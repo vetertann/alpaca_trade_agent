@@ -1260,7 +1260,8 @@ class Agent:
                                {"input": c.input_tokens, "output": c.output_tokens,
                                 "cached": c.cached_tokens,
                                 "cache_write": c.cache_write_tokens,
-                                "reasoning": c.reasoning_tokens}, c.latency_s)
+                                "reasoning": c.reasoning_tokens,
+                                "attempts": c.attempts}, c.latency_s)
             # A staged order may only be confirmed by a later model program.  Mark
             # the boundary on the host before serving this program's RPC calls.
             self.executor.begin_program(rnd)

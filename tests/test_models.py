@@ -17,6 +17,15 @@ def test_resolve_prefers_the_head_of_the_chain(monkeypatch):
     assert models.resolve("decision").model == "claude-opus-5"
 
 
+def test_gpt_56_sol_is_primary_when_openai_is_available(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    resolved = models.resolve("decision")
+    assert resolved.provider == "openai"
+    assert resolved.model == "gpt-5.6-sol"
+    assert resolved.params["reasoning_effort"] == "medium"
+
+
 def test_resolve_falls_back_when_a_key_is_missing(monkeypatch):
     """Only OpenAI is reachable, so the chain must walk past Anthropic and Nebius."""
     monkeypatch.setenv("OPENAI_API_KEY", "x")

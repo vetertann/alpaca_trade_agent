@@ -220,7 +220,7 @@ competition window opened. All agent source in `src/` was written during the eve
 `websockets`, `msgpack`, `numpy`, `pandas`, `scipy`, `python-dotenv`, `pytest`,
 `opentelemetry-api`/`-sdk`/`-exporter-otlp-proto-grpc`.
 
-**Model providers.** Anthropic (`claude-opus-5`), OpenAI (`gpt-5.5`, `gpt-5.4`), and
+**Model providers.** Anthropic (`claude-opus-5`), OpenAI (`gpt-5.6-sol`, `gpt-5.5`, `gpt-5.4`), and
 Nebius AI Studio (`openai/gpt-oss-120b`, `moonshotai/Kimi-K3`,
 `Qwen/Qwen3.5-397B-A17B`) behind one shim, selected per role with fallback chains.
 Featherless AI is wired for the news-triage role.
@@ -247,7 +247,7 @@ scripts/
   calibrate.py       live spread and volatility-state measurement
   estimate_cost.py   token and cost projection from measured usage
 deploy/              systemd unit, provisioning, deploy script
-tests/               481 passing tests
+tests/               484 passing tests
 ```
 
 Design detail lives in `ARCHITECTURE.md`. Operating procedure lives in `RUNBOOK.md`.

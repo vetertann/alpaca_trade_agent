@@ -37,6 +37,8 @@ SONNET_5    = ModelSpec("anthropic", "claude-sonnet-5", "ANTHROPIC_API_KEY",
                         params={"thinking": {"type": "adaptive",
                                              "display": "summarized"}})
 HAIKU_45    = ModelSpec("anthropic", "claude-haiku-4-5", "ANTHROPIC_API_KEY")
+GPT_56_SOL  = ModelSpec("openai", "gpt-5.6-sol",   "OPENAI_API_KEY",
+                        params={"reasoning_effort": "medium"})
 GPT_55      = ModelSpec("openai", "gpt-5.5",       "OPENAI_API_KEY")
 GPT_54      = ModelSpec("openai", "gpt-5.4",       "OPENAI_API_KEY")
 GPT_54_MINI = ModelSpec("openai", "gpt-5.4-mini",  "OPENAI_API_KEY")
@@ -49,10 +51,10 @@ QWEN_397B   = ModelSpec("nebius", "Qwen/Qwen3.5-397B-A17B",  "NEBIUS_API_KEY", N
 # and returned zero characters of content (measured 2026-08-29).
 
 CHAINS: dict[str, list[ModelSpec]] = {
-    # Production roles, used in the scored window. Kimi sits directly behind Opus
-    # because it is the only fallback proven against the real {thought, code}
-    # contract across full cycles; the others were verified on a toy prompt.
-    "decision": [OPUS_5, KIMI_K3, GPT_55, GPT_OSS],
+    # Production roles, used in the scored window. GPT-5.6 Sol is primary after
+    # passing the real JSON/Python adapter contract locally. Opus and Kimi remain
+    # heterogeneous fallbacks; GPT-OSS is the final independent deployment path.
+    "decision": [GPT_56_SOL, OPUS_5, KIMI_K3, GPT_OSS],
     "triage":   [GPT_OSS, HAIKU_45],
     "critic":   [GPT_54, SONNET_5],
     # Development roles: cheap Nebius models for build-and-test iteration, so
