@@ -613,7 +613,7 @@ Thursday September 3 is the last scored session. Its WINDING DOWN begins at 15:0
 
 ### Three tiers
 
-**Tier 0 — continuous, no LLM.** Consumes the four streams, maintains the rolling series, samples broker equity and every normalized structure at ten-second cadence, joins executable closing quotes to durable entry cash flows, evaluates exit conditions from the thesis store and acts on them, re-centres the option window, detects assignment, and enforces the rate limiter. Most of what the system does in a session happens here at no model cost.
+**Tier 0 — continuous, no LLM.** Consumes the four streams, maintains the rolling series, and runs a supervised exit task at ten-second cadence. That task reconciles broker orders, detects assignment, retries durable mandatory exits, samples broker equity and every normalized structure, joins executable closing quotes to durable entry cash flows, and enforces hard stops, deadlines and adaptive exits. It is a separate async task from the serialized Tier 2 decision cycle: a slow or unavailable model cannot suspend exit enforcement or live portfolio marks. Background reconciliation deliberately leaves orderless draft theses alone because a concurrent model program may be between thesis creation and submission; full draft cleanup remains at startup and decision boundaries. Tier 0 also re-centres the option window and enforces the rate limiter. Most of what the system does in a session happens here at no model cost.
 
 The decision program may also delegate a structure-specific adaptive profit policy
 to Tier 0: an executable-profit activation level, maximum giveback from the observed

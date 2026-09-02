@@ -224,6 +224,7 @@ class Agent:
         self.expiries: list[str] = []
         self._cycle_lock = asyncio.Lock()
         self._exit_sweep_lock = threading.RLock()
+        self._execution_reconcile_lock = threading.RLock()
         self.starting_equity: float | None = None
         self.starting_equity_captured_at: str | None = None
         self.restart_rebaseline_needed = False
@@ -671,19 +672,25 @@ class Agent:
                 pass
         return None
 
-    async def _portfolio_monitor(self, tick_seconds: float = 10.0) -> None:
-        """Read-only sampler that remains alive while Tier 2 is reasoning."""
+    async def _exit_monitor(self, tick_seconds: float = 10.0) -> None:
+        """Run the complete deterministic exit path independently of Tier 2.
+
+        Decision cycles execute in a worker thread and may spend minutes waiting
+        for a model or a simulation.  This task deliberately owns reconciliation,
+        assignment detection, mandatory-exit retries, fresh portfolio marking and
+        all hard/adaptive exit evaluation, so none of those safety paths share the
+        model's wait boundary.
+        """
         while True:
             now = dt.datetime.now(ET)
             trading_day = getattr(self, "_current_trading_day", now.weekday() < 5)
             if session_state(now, trading_day) != "CLOSED":
                 try:
-                    snap = await asyncio.to_thread(self._sample_portfolio, now)
                     await asyncio.to_thread(
-                        self._evaluate_snapshot_exits, snap, now,
-                        observe_adaptive=True)
+                        self.sweep_exits, now, observe_adaptive=True,
+                        reconcile_drafts=False, force_snapshot=True)
                 except Exception as exc:
-                    self.trace.error("portfolio_monitor", exc)
+                    self.trace.error("exit_monitor", exc)
             await asyncio.sleep(tick_seconds)
 
     def _record_trigger_evaluation(self, trigger: dict, status: str,
@@ -1556,7 +1563,25 @@ class Agent:
             self.trace.error("shadow", exc)
 
     # ---- Tier 0 sweep -----------------------------------------------------
-    def _reconcile_execution(self, cancel_after_s: float = 60.0) -> list[dict]:
+    def _reconcile_execution(self, cancel_after_s: float = 60.0, *,
+                             reconcile_drafts: bool = True) -> list[dict]:
+        """Refresh durable broker state under one process-wide lock.
+
+        The independent exit monitor sets ``reconcile_drafts=False`` because a
+        model program may have opened a thesis but not submitted its order yet.
+        Broker/order reconciliation remains safe and necessary in that window;
+        declaring an orderless thesis abandoned does not.
+        """
+        lock = getattr(self, "_execution_reconcile_lock", None)
+        if lock is None:
+            self._execution_reconcile_lock = lock = threading.RLock()
+        with lock:
+            return self._reconcile_execution_locked(
+                cancel_after_s=cancel_after_s,
+                reconcile_drafts=reconcile_drafts)
+
+    def _reconcile_execution_locked(self, cancel_after_s: float = 60.0, *,
+                                    reconcile_drafts: bool = True) -> list[dict]:
         updates = self.executor.reconcile_orders(cancel_after_s=cancel_after_s)
         descs = self.ledger.descriptors()
         states = self.ledger.states()
@@ -1579,45 +1604,47 @@ class Agent:
         # A thesis is not exposure.  If every associated entry order terminated
         # without a fill, close it so it cannot enter future prompt bundles as a
         # fictional hedge or position.
-        unfilled_terminal = {"canceled", "cancelled", "expired", "rejected",
-                             "not_found"}
-        open_theses = (self.theses.list("open")
-                       if hasattr(self.theses, "list") else [])
-        exposed_thesis_ids = {
-            str(row.get("thesis_id") or "") for row in summaries.values()
-            if float(row.get("ledger_open_qty") or 0) > 0 and row.get("thesis_id")}
-        trigger_store = getattr(self, "action_triggers", None)
-        active_trigger_thesis_ids = set()
-        if trigger_store is not None:
-            active_trigger_thesis_ids = {
-                str((row.get("intent") or {}).get("thesis_id") or "")
-                for row in trigger_store.current().values()
-                if row.get("purpose") == "entry"
-                and row.get("status") in ("active", "firing")}
-        for thesis in open_theses:
-            if not thesis.order_ids:
-                if (thesis.thesis_id in exposed_thesis_ids
-                        or thesis.thesis_id in active_trigger_thesis_ids):
+        if reconcile_drafts:
+            unfilled_terminal = {"canceled", "cancelled", "expired", "rejected",
+                                 "not_found"}
+            open_theses = (self.theses.list("open")
+                           if hasattr(self.theses, "list") else [])
+            exposed_thesis_ids = {
+                str(row.get("thesis_id") or "") for row in summaries.values()
+                if float(row.get("ledger_open_qty") or 0) > 0
+                and row.get("thesis_id")}
+            trigger_store = getattr(self, "action_triggers", None)
+            active_trigger_thesis_ids = set()
+            if trigger_store is not None:
+                active_trigger_thesis_ids = {
+                    str((row.get("intent") or {}).get("thesis_id") or "")
+                    for row in trigger_store.current().values()
+                    if row.get("purpose") == "entry"
+                    and row.get("status") in ("active", "firing")}
+            for thesis in open_theses:
+                if not thesis.order_ids:
+                    if (thesis.thesis_id in exposed_thesis_ids
+                            or thesis.thesis_id in active_trigger_thesis_ids):
+                        continue
+                    # Staging is intentionally in memory only.  After a crash or
+                    # restart, an orderless open thesis cannot represent broker
+                    # exposure and must not contaminate the next prompt.
+                    self.theses.close(
+                        thesis.thesis_id,
+                        reason="unsubmitted draft did not survive reconciliation")
+                    self.trace.note("thesis_reconciled_unsubmitted",
+                                    thesis_id=thesis.thesis_id)
                     continue
-                # Staging is intentionally in memory only.  After a crash or
-                # restart, an orderless open thesis cannot represent broker
-                # exposure and must not contaminate the next prompt.
-                self.theses.close(
-                    thesis.thesis_id,
-                    reason="unsubmitted draft did not survive reconciliation")
-                self.trace.note("thesis_reconciled_unsubmitted",
-                                thesis_id=thesis.thesis_id)
-                continue
-            order_states = [states.get(order_id) for order_id in thesis.order_ids]
-            if (all(state is not None for state in order_states)
-                    and all(str(state.get("status")) in unfilled_terminal
-                            and float(state.get("filled_qty") or 0) <= 0
-                            for state in order_states)):
-                self.theses.close(thesis.thesis_id,
-                                  reason="all entry orders terminated unfilled")
-                self.trace.note("thesis_reconciled_unfilled",
-                                thesis_id=thesis.thesis_id,
-                                order_ids=list(thesis.order_ids))
+                order_states = [states.get(order_id) for order_id in thesis.order_ids]
+                if (all(state is not None for state in order_states)
+                        and all(str(state.get("status")) in unfilled_terminal
+                                and float(state.get("filled_qty") or 0) <= 0
+                                for state in order_states)):
+                    self.theses.close(thesis.thesis_id,
+                                      reason="all entry orders terminated unfilled")
+                    self.trace.note("thesis_reconciled_unfilled",
+                                    thesis_id=thesis.thesis_id,
+                                    order_ids=list(thesis.order_ids))
         blocker_fn = getattr(self.executor, "entry_blockers", None)
         blockers = blocker_fn() if blocker_fn else []
         signature = tuple(sorted((str(b.get("client_order_id")), str(b.get("status")))
@@ -1729,15 +1756,30 @@ class Agent:
                 acted.append(f"{sid}: retry failed ({exc})")
         return acted
 
-    def sweep_exits(self, now: dt.datetime | None = None) -> list[str]:
+    def sweep_exits(self, now: dt.datetime | None = None, *,
+                    observe_adaptive: bool = False,
+                    reconcile_drafts: bool = True,
+                    force_snapshot: bool = False) -> list[str]:
         now = now or dt.datetime.now(ET)
-        self._reconcile_execution()
+        try:
+            self._reconcile_execution(reconcile_drafts=reconcile_drafts)
+        except Exception as exc:
+            # A broker-order lookup failure must not suppress a hard stop or
+            # deadline check against positions and quotes that are still live.
+            self.trace.error("exit_reconciliation", exc)
         positions = self.rest.positions()
-        self._detect_assignment(positions)
+        try:
+            self._detect_assignment(positions)
+        except Exception as exc:
+            self.trace.error("exit_assignment_detection", exc)
         state = self.ledger.risk_snapshot(positions)
-        mandatory = self._retry_mandatory_exits(state["structures"], now)
+        try:
+            mandatory = self._retry_mandatory_exits(state["structures"], now)
+        except Exception as exc:
+            self.trace.error("mandatory_exit_retry", exc)
+            mandatory = []
         current_ids = {str(row.get("structure_id")) for row in state["structures"]}
-        snap = self._recent_portfolio_snapshot(now)
+        snap = None if force_snapshot else self._recent_portfolio_snapshot(now)
         sampled_ids = {str(row.get("structure_id")) for row in
                        (snap or {}).get("structures") or []}
         if snap is None or sampled_ids != current_ids:
@@ -1751,7 +1793,7 @@ class Agent:
                 self.trace.note("exit_snapshot_fallback", error=str(exc)[:400])
                 snap = {"structures": state["structures"]}
         return mandatory + self._evaluate_snapshot_exits(
-            snap, now, observe_adaptive=False)
+            snap, now, observe_adaptive=observe_adaptive)
 
     def _evaluate_snapshot_exits(self, snapshot: dict, now: dt.datetime,
                                  *, observe_adaptive: bool) -> list[str]:
@@ -1848,11 +1890,11 @@ class Agent:
     # ---- main loop --------------------------------------------------------
     async def run_forever(self, tick_seconds: float = 10.0) -> None:
         await self.start()
-        # Read-only marking is independent of the expensive decision thread, so
-        # the UI and the next trigger keep a dynamic picture while a model spends
-        # minutes simulating or reviewing a staged order.
-        self._portfolio_monitor_task = asyncio.create_task(
-            self._portfolio_monitor(tick_seconds))
+        # Full Tier-0 exit enforcement is independent of the expensive decision
+        # thread.  A hung provider cannot pause reconciliation, assignment checks,
+        # mandatory retries, stop/deadline exits, adaptive trails or UI marks.
+        self._exit_monitor_task = asyncio.create_task(
+            self._exit_monitor(tick_seconds))
         self._action_trigger_task = asyncio.create_task(
             self._action_trigger_monitor(1.0))
         last_state = None
@@ -1872,7 +1914,6 @@ class Agent:
                 last_state = state
 
             if state != "CLOSED":
-                self.sweep_exits()
                 allowed, why = entries_allowed(now, trading_day)
                 book = self.rest.positions()
                 portfolio_state = self.ledger.risk_snapshot(book)
@@ -1918,8 +1959,8 @@ class Agent:
                         trading_day=trading_day)
                 # Defence in depth: no Tier-2 source (including startup and
                 # restart-rebaseline paths) may exceed the session cycle budget.
-                # Deterministic Tier-0 exits have already run above and remain
-                # independent of model availability and cycle accounting.
+                # Deterministic Tier-0 exits run in the independent exit monitor
+                # and remain outside model availability and cycle accounting.
                 if (trig is not None
                         and self.triggers.cycles_this_session
                         >= MAX_CYCLES_PER_SESSION):

@@ -1,5 +1,8 @@
 from types import SimpleNamespace
+import asyncio
+import contextlib
 import datetime as dt
+import threading
 
 from agent.brain import preflight
 from agent.brain.loop import Trigger, TriggerState
@@ -395,6 +398,77 @@ def test_canceled_unfilled_entry_thesis_is_closed_during_reconciliation(tmp_path
     agent._reconcile_execution()
 
     assert agent.theses.get(thesis.thesis_id).status == "closed"
+
+
+def test_background_reconciliation_does_not_close_in_progress_draft(tmp_path):
+    agent = Agent.__new__(Agent)
+    agent.theses = ThesisStore(tmp_path / "theses.jsonl")
+    thesis = agent.theses.open("program draft", "QQQ", exit_profit="p",
+                               exit_invalidation="i",
+                               exit_time="2026-09-03 15:45 ET")
+
+    class ReconcileExecutor:
+        def reconcile_orders(self, cancel_after_s=60): return []
+        def entry_blockers(self): return []
+
+    class ReconcileLedger:
+        def descriptors(self): return {}
+        def states(self): return {}
+        def structure_summaries(self): return {}
+
+    agent.executor = ReconcileExecutor()
+    agent.ledger = ReconcileLedger()
+    agent.trace = Trace()
+
+    agent._reconcile_execution(reconcile_drafts=False)
+
+    assert agent.theses.get(thesis.thesis_id).status == "open"
+
+
+def test_exit_monitor_runs_while_decision_cycle_is_blocked(monkeypatch):
+    monkeypatch.setattr("agent.run.session_state", lambda *_args: "ACTIVE")
+    agent = Agent.__new__(Agent)
+    agent._cycle_lock = asyncio.Lock()
+    agent._current_trading_day = True
+    agent.trace = Trace()
+    release_model = threading.Event()
+    exit_ran = threading.Event()
+    sweep_calls = []
+
+    def blocked_cycle(_trigger):
+        release_model.wait(timeout=2)
+        return "NO_TRADE"
+
+    def sweep(now, **kwargs):
+        sweep_calls.append((now, kwargs))
+        exit_ran.set()
+        return []
+
+    agent._cycle_blocking = blocked_cycle
+    agent.sweep_exits = sweep
+
+    async def scenario():
+        cycle_task = asyncio.create_task(
+            agent.cycle(Trigger("test", "blocked provider")))
+        monitor_task = asyncio.create_task(agent._exit_monitor(0.01))
+        try:
+            observed = await asyncio.wait_for(
+                asyncio.to_thread(exit_ran.wait, 0.5), timeout=1)
+            assert observed is True
+            assert cycle_task.done() is False
+            assert sweep_calls[0][1] == {
+                "observe_adaptive": True,
+                "reconcile_drafts": False,
+                "force_snapshot": True,
+            }
+        finally:
+            release_model.set()
+            assert await asyncio.wait_for(cycle_task, timeout=1) == "NO_TRADE"
+            monitor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await monitor_task
+
+    asyncio.run(scenario())
 
 
 def test_orderless_thesis_is_preserved_while_broker_exposure_remains(tmp_path):
