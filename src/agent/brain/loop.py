@@ -10,7 +10,8 @@ import math
 from dataclasses import dataclass, field
 
 from agent.config import (ENTRY_CUTOFF_ET, ENTRY_OPEN_ET, FINAL_ENTRY_CUTOFF_ET,
-                          ET, WINDOW_CLOSE, entry_cutoff_et, in_scored_window)
+                          ET, WINDOW_CLOSE, entry_cutoff_et,
+                          in_autonomous_trading_window)
 
 WARM_UP_MINUTES = 15          # spreads are widest into the opening auction
 WIND_DOWN_ET = ENTRY_CUTOFF_ET
@@ -48,8 +49,8 @@ def session_state(now_et: dt.datetime, trading_day: bool = True) -> str:
 
 
 def entries_allowed(now_et: dt.datetime, trading_day: bool = True) -> tuple[bool, str]:
-    if not in_scored_window(now_et):
-        return False, "outside the scored window"
+    if not in_autonomous_trading_window(now_et):
+        return False, "outside the operator-authorized trading window"
     state = session_state(now_et, trading_day)
     if state != "ACTIVE":
         return False, f"session state {state}"

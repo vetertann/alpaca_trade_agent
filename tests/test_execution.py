@@ -1118,6 +1118,26 @@ def test_close_partial_fill_cancel_and_restart(tmp_path):
     assert after["premium_at_risk"] == 270
 
 
+def test_absolute_entry_cutoff_does_not_block_an_exit():
+    ex, rest = make()
+    intent = vertical()
+    structure = {
+        "structure_id": ex._key(intent),
+        "thesis_id": intent.thesis_id,
+        "underlying": intent.underlying,
+        "family": intent.family,
+        "qty": 1,
+        "legs": ex._legs_json(intent),
+    }
+    after_window = dt.datetime(2026, 9, 4, 20, 1, tzinfo=dt.timezone.utc)
+
+    out = ex.close_structure(structure, reason="post-window risk exit",
+                             now=after_window)
+
+    assert out["status"] == "submitted_close"
+    assert len(rest.submitted) == 1
+
+
 def test_timeout_after_accept_is_durable_and_adopted_by_exact_client_id(tmp_path):
     ledger = ExecutionLedger(tmp_path / "execution.jsonl")
     rest = AmbiguousRest()

@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 # Push code and restart. Run from the repo root on the laptop.
-#   ./deploy/deploy.sh [--mode propose|execute] [--profile dev|competition]
+#   ./deploy/deploy.sh [--mode propose|execute]
 set -euo pipefail
 
 HOST=${HOST:-root@185.102.78.75}
 KEY=${KEY:-$HOME/.ssh/alpaca_agent_vps}
 APP=/opt/alpaca-agent
 MODE=propose
-PROFILE=dev
+PROFILE=competition
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --mode) MODE=$2; shift 2 ;;
-    --profile) PROFILE=$2; shift 2 ;;
     *) echo "unknown arg $1" >&2; exit 2 ;;
   esac
 done

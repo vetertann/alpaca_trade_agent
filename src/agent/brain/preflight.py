@@ -13,8 +13,8 @@ import hashlib
 import json
 import math
 
-from agent.config import (ENTRY_OPEN_ET, ET, MEASUREMENT_END, WINDOW_CLOSE,
-                          entry_cutoff_et)
+from agent.config import (AUTONOMOUS_TRADING_END, ENTRY_OPEN_ET, ET,
+                          MEASUREMENT_END, WINDOW_CLOSE, entry_cutoff_et)
 from agent.brain import scheduled_events
 from agent.host.rest import Rest
 from agent.host.series import RollingSeries
@@ -308,6 +308,11 @@ def build(rest: Rest, series: RollingSeries, theses: ThesisStore, *,
                 (WINDOW_CLOSE - et).total_seconds() / 3600, 1),
             "official_equity_mark_at": WINDOW_CLOSE.isoformat(timespec="seconds"),
             "measurement_window_ends_at": MEASUREMENT_END.isoformat(timespec="seconds"),
+            "autonomous_trading_ends_at": (
+                AUTONOMOUS_TRADING_END.isoformat(timespec="seconds")),
+            "hours_to_autonomous_trading_end": round(
+                (AUTONOMOUS_TRADING_END - et).total_seconds() / 3600, 1),
+            "post_submission_session": et >= MEASUREMENT_END,
             "hours_to_measurement_end": round(
                 (MEASUREMENT_END - et).total_seconds() / 3600, 1),
             "trading_days_to_equity_mark": round(
@@ -374,6 +379,11 @@ def refresh_for_confirmation(rest: Rest, series: RollingSeries, bundle: dict, *,
         "hours_to_window_close": round((WINDOW_CLOSE - et).total_seconds() / 3600, 1),
         "official_equity_mark_at": WINDOW_CLOSE.isoformat(timespec="seconds"),
         "measurement_window_ends_at": MEASUREMENT_END.isoformat(timespec="seconds"),
+        "autonomous_trading_ends_at": (
+            AUTONOMOUS_TRADING_END.isoformat(timespec="seconds")),
+        "hours_to_autonomous_trading_end": round(
+            (AUTONOMOUS_TRADING_END - et).total_seconds() / 3600, 1),
+        "post_submission_session": et >= MEASUREMENT_END,
         "hours_to_measurement_end": round(
             (MEASUREMENT_END - et).total_seconds() / 3600, 1),
         "trading_days_to_equity_mark": round(

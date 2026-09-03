@@ -25,7 +25,9 @@ def test_final_session_keeps_entry_window_until_1555():
 
 
 def test_entries_blocked_outside_window_and_states():
-    assert not loop.entries_allowed(et(4, 10, 0))[0]      # Friday, outside
+    assert loop.entries_allowed(et(4, 10, 0))[0]          # authorised Friday session
+    assert not loop.entries_allowed(et(4, 15, 45))[0]     # ordinary cutoff
+    assert not loop.entries_allowed(et(8, 10, 0))[0]      # never reopens next week
     assert not loop.entries_allowed(et(1, 9, 35))[0]      # warm-up
     assert loop.entries_allowed(et(1, 12, 0))[0]
 

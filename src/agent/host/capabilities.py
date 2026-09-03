@@ -12,7 +12,7 @@ import math
 import re
 from typing import Any
 
-from agent.config import ET, WINDOW_CLOSE
+from agent.config import ET
 from agent.host import telemetry
 from agent.host.action_triggers import ActionTriggerStore, entry_condition
 from agent.host import entry_signal
@@ -516,9 +516,9 @@ class Capabilities:
     def _vol_measures_for(self, candidate_id, sigma=None, skew=0.15):
         """Build the exact distribution horizon for one enumerated candidate.
 
-        Expiring contracts use their close; later contracts use WINDOW_CLOSE.
-        Generated code cannot accidentally evaluate a post-window option as if
-        its terminal payoff were observed during the competition.
+        Expiring contracts use their close; later contracts use the active
+        host-owned horizon (official score, then the authorised Friday close).
+        Generated code cannot substitute terminal payoff for an earlier mark.
         """
         c = self._candidates.get(candidate_id)
         if c is None:
@@ -532,23 +532,26 @@ class Capabilities:
             evaluation_at=horizon["evaluation_at"],
             residual_calendar_days_at_evaluation=(
                 horizon["residual_calendar_days_at_evaluation"]),
-            valuation_basis=horizon["valuation_basis"])
+            valuation_basis=horizon["valuation_basis"],
+            horizon_kind=horizon["horizon_kind"])
 
     @staticmethod
     def _candidate_value_function(c: cand.Candidate, context: dict):
         expiry_at = score_horizon.expiry_close(c.expiry)
-        expected_at = score_horizon.evaluation_at(c.expiry)
+        expected_at = dt.datetime.fromisoformat(str(
+            c.detail.get("evaluation_at")
+            or score_horizon.evaluation_at(c.expiry).isoformat()))
         if context.get("horizon_source") == "candidate_score_horizon":
             actual_at = dt.datetime.fromisoformat(str(context.get("evaluation_at")))
             if actual_at != expected_at:
                 raise CapabilityError(
-                    "measure handle does not match candidate score horizon")
-        if expiry_at <= WINDOW_CLOSE:
+                    "measure handle does not match candidate decision horizon")
+        if expiry_at <= expected_at:
             return lambda spot: st.net_payoff_at(c.legs, spot)
         if context.get("horizon_source") != "candidate_score_horizon":
             raise CapabilityError(
-                "post-window candidates must use vol.measures_for(candidate_id); "
-                "expiry payoff is not score-time account value")
+                "post-horizon candidates must use vol.measures_for(candidate_id); "
+                "expiry payoff is not decision-horizon account value")
         return lambda spot: score_horizon.executable_value(c, spot, expected_at)
 
     def _vol_evaluate(self, candidate_id, measure_handle,
@@ -585,10 +588,11 @@ class Capabilities:
             c.expiry, dt.datetime.now(dt.timezone.utc))
         out.update({key: horizon[key] for key in (
             "evaluation_at", "score_horizon_trading_days",
-            "residual_calendar_days_at_evaluation", "valuation_basis")})
+            "residual_calendar_days_at_evaluation", "valuation_basis",
+            "horizon_kind")})
+        at = dt.datetime.fromisoformat(horizon["evaluation_at"])
         if (include_iv_sensitivity
-                and score_horizon.expiry_close(c.expiry) > WINDOW_CLOSE):
-            at = score_horizon.evaluation_at(c.expiry)
+                and score_horizon.expiry_close(c.expiry) > at):
             out["score_horizon_iv_sensitivity"] = {
                 f"iv_{int(multiplier * 100)}pct": round(
                     sum(m.expected(lambda spot, mult=multiplier:
@@ -807,7 +811,7 @@ class Capabilities:
         horizon = score_horizon.candidate_horizon(
             c.expiry, dt.datetime.now(dt.timezone.utc))
         evaluation_at = dt.datetime.fromisoformat(horizon["evaluation_at"])
-        if score_horizon.expiry_close(c.expiry) > WINDOW_CLOSE:
+        if score_horizon.expiry_close(c.expiry) > evaluation_at:
             score_scenarios = {
                 label: {
                     "underlying_price": round(max(spot + move, 0.01), 4),

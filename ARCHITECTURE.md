@@ -20,12 +20,18 @@ Mon Aug 31   09:30–16:00 ET   SCORED   agent must be live at the open
 Tue Sep 01   09:30–16:00 ET   SCORED
 Wed Sep 02   09:30–16:00 ET   SCORED
 Thu Sep 03   09:30–16:00 ET   SCORED   ← last actionable moment, 16:00 ET
-Fri Sep 04   09:30 ET equity snapshot · 11:00 ET submission deadline
+Fri Sep 04   09:30 ET equity snapshot · post-submission paper session to 16:00 ET
 ```
 
 The FAQ defines two related timestamps: total account equity is evaluated at EOD Thursday September 3, while the formal measurement window ends Friday September 4 at 09:30 ET. Options cannot trade between them, so score-horizon valuation uses Thursday EOD and scheduling closes the window at Friday 09:30.
 
-**Operative trading rule: four option sessions, ending Thursday September 3 at 16:00 ET.** The measured object is total account equity, not realised cash. The portfolio must be at its target marked posture by Thursday's close; an option need not expire or be sold by then for its value to count.
+**Scoring rule: four option sessions, ending Thursday September 3 at 16:00 ET.** The measured object is total account equity, not realised cash. The portfolio must be at its target marked posture by Thursday's close; an option need not expire or be sold by then for its value to count.
+
+After submission, the operator explicitly authorized one additional paper-trading
+session on Friday. It is not represented as scored performance. The host switches
+candidate valuation to the Friday close, uses the ordinary 15:45 ET entry cutoff,
+and permanently refuses new entries from Friday 16:00 ET onward. Exit monitoring
+and reconciliation remain live, so the fixed end cannot strand a position.
 
 Alpaca states that exercises and assignments for contracts expiring September 3 are reflected in the Thursday EOD value. That mechanism is not something the strategy depends on: non-trade activities post the following day, assignment can occur after the close, and Alpaca begins its own expiry risk management around 15:30 ET.
 
@@ -1398,7 +1404,7 @@ helper is a no-op when disabled, so telemetry can never break trading.
 
 ## 15. Build status
 
-Implemented and verified. **510 tests.**
+Implemented and verified. **515 tests.**
 
 | Component | Module | State |
 |---|---|---|
@@ -1583,13 +1589,16 @@ cancellation, restart and close-path rehearsals.
 
 **Thursday evening to Friday** — write-up, video, slides, static trace report.
 
+**Friday 09:45–15:45 ET** — explicitly authorized post-submission paper session;
+balanced risk profile, no effect on the official score.
+
 **Friday 11:00 ET** — submit.
 
 ---
 
 ## 17. Deployment
 
-The agent runs Monday 09:30 through Thursday 16:00 unattended, so it runs on a VPS
+The agent runs through the authorized Friday paper session unattended, so it runs on a VPS
 rather than a laptop that can sleep or lose a network. The trading process listens
 on no port; its Alpaca, model-provider and telemetry connections are outbound. The
 read-only paper-demo panel is a separate systemd service.

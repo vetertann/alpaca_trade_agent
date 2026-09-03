@@ -7,7 +7,9 @@ the model then observes that result before writing the next program, staging a
 trade, or recording `NO_TRADE`.
 
 Built for the Alpaca AI Trading Agents Hackathon. Scored window: Monday 31 August
-09:30 ET through end of day Thursday 3 September 2026.
+09:30 ET through end of day Thursday 3 September 2026. One explicitly authorized
+post-submission paper session runs on Friday 4 September; host entry permission then
+expires permanently at 16:00 ET.
 
 ## What is different about it
 
@@ -52,7 +54,7 @@ prints the gate checklist without submitting; `--mode execute` submits.
 `--dev-models` routes to cheap Nebius models for build-and-test iteration.
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # 510 passed
+.venv/bin/python -m pytest tests/ -q          # 515 passed
 ```
 
 Deploy the competition agent to the server. The trading process itself listens on
@@ -247,7 +249,7 @@ scripts/
   calibrate.py       live spread and volatility-state measurement
   estimate_cost.py   token and cost projection from measured usage
 deploy/              systemd unit, provisioning, deploy script
-tests/               510 passing tests
+tests/               515 passing tests
 ```
 
 Design detail lives in `ARCHITECTURE.md`. Operating procedure lives in `RUNBOOK.md`.

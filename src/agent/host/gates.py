@@ -9,7 +9,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 
-from agent.config import PAPER_TRADING_URL, in_scored_window
+from agent.config import PAPER_TRADING_URL
 from agent.host.risk_params import RiskParams
 from agent.quant import structures as st
 from agent.types import GateResult, Leg
@@ -39,11 +39,8 @@ def g_account_identity(account: dict, profile_name: str, expected_account_id: st
     if expected not in known:
         return GateResult("account_identity", False,
                           f"{profile_name} credentials resolved to an unexpected account")
-    if profile_name == "competition" and not in_scored_window(now):
-        return GateResult("account_identity", False,
-                          "competition account addressed outside the scored window")
-    where = "in window" if profile_name == "competition" else "verified"
-    return GateResult("account_identity", True, f"{profile_name} account, {where}")
+    return GateResult("account_identity", True,
+                      f"{profile_name} account identity verified")
 
 
 def g_account_tradable(account: dict) -> GateResult:

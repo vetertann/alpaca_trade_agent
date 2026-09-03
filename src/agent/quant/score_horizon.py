@@ -1,9 +1,10 @@
-"""Competition score-horizon option valuation.
+"""Host-owned decision-horizon option valuation.
 
 The account is judged on total marked equity at the Thursday close.  An option
 expiring after that instant still owns time value, so expiry payoff is not a
-valid proxy for its score contribution.  These helpers keep the relevant date
-math and executable mark convention host-owned.
+valid proxy for its score contribution.  The explicitly authorized Friday paper
+session uses Friday close instead.  These helpers keep both timestamps and the
+executable mark convention host-owned without rewriting the official score.
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import datetime as dt
 import math
 from collections.abc import Mapping
 
-from agent.config import ET, WINDOW_CLOSE
+from agent.config import AUTONOMOUS_TRADING_END, ET, MEASUREMENT_END, WINDOW_CLOSE
 from agent.quant import bs
 from agent.types import CONTRACT_MULTIPLIER
 
@@ -30,9 +31,19 @@ def expiry_close(expiry: str | dt.date | dt.datetime) -> dt.datetime:
     return dt.datetime.combine(value, SESSION_CLOSE, tzinfo=ET)
 
 
-def evaluation_at(expiry: str | dt.date | dt.datetime) -> dt.datetime:
-    """Earlier of contract expiry and the official equity measurement."""
-    return min(expiry_close(expiry), WINDOW_CLOSE)
+def decision_horizon(now: dt.datetime | None = None) -> dt.datetime:
+    """Active economic horizon without rewriting the official score timestamp."""
+    if now is None:
+        return WINDOW_CLOSE
+    observed = now if now.tzinfo is not None else now.replace(tzinfo=ET)
+    return (AUTONOMOUS_TRADING_END
+            if observed.astimezone(ET) >= MEASUREMENT_END else WINDOW_CLOSE)
+
+
+def evaluation_at(expiry: str | dt.date | dt.datetime,
+                  now: dt.datetime | None = None) -> dt.datetime:
+    """Earlier of contract expiry and the active, host-owned decision horizon."""
+    return min(expiry_close(expiry), decision_horizon(now))
 
 
 def trading_days_between(now: dt.datetime, target: dt.datetime) -> float:
@@ -57,7 +68,8 @@ def trading_days_between(now: dt.datetime, target: dt.datetime) -> float:
 
 def candidate_horizon(expiry: str | dt.date | dt.datetime,
                       now: dt.datetime) -> dict:
-    at = evaluation_at(expiry)
+    horizon_end = decision_horizon(now)
+    at = evaluation_at(expiry, now)
     contract_expiry = expiry_close(expiry)
     trading_days = max(trading_days_between(now, at), 1.0 / 390.0)
     residual = max((contract_expiry - at).total_seconds() / 86400.0, 0.0)
@@ -67,7 +79,11 @@ def candidate_horizon(expiry: str | dt.date | dt.datetime,
         "residual_calendar_days_at_evaluation": round(residual, 6),
         "valuation_basis": (
             "expiry_payoff" if residual <= 0 else
-            "Thursday score-time executable mark with residual time value"),
+            ("Thursday score-time executable mark with residual time value"
+             if horizon_end == WINDOW_CLOSE else
+             "Friday post-submission executable mark with residual time value")),
+        "horizon_kind": ("official_score" if horizon_end == WINDOW_CLOSE
+                         else "post_submission_paper_session"),
     }
 
 

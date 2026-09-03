@@ -22,6 +22,10 @@ DATA_URL = "https://data.alpaca.markets"
 WINDOW_OPEN = dt.datetime(2026, 8, 31, 9, 30, tzinfo=ET)
 EOD_EQUITY_MARK = dt.datetime(2026, 9, 3, 16, 0, tzinfo=ET)
 MEASUREMENT_END = dt.datetime(2026, 9, 4, 9, 30, tzinfo=ET)
+# The operator explicitly authorised one post-submission paper session.  Keep this
+# separate from the immutable scoring timestamps: Friday decisions do not affect
+# the official score, and entry permission expires permanently at the close.
+AUTONOMOUS_TRADING_END = dt.datetime(2026, 9, 4, 16, 0, tzinfo=ET)
 # Compatibility/economic-horizon name used by valuation code. Options are valued
 # at Thursday EOD, not at Friday's post-window snapshot timestamp.
 WINDOW_CLOSE = EOD_EQUITY_MARK
@@ -42,8 +46,8 @@ def entry_cutoff_et(day: dt.date) -> dt.time:
 def entry_submission_allowed(now: dt.datetime | None = None) -> tuple[bool, str]:
     """Last host-owned guard before any new-entry broker submission."""
     now_et = (now or dt.datetime.now(dt.timezone.utc)).astimezone(ET)
-    if not in_scored_window(now_et):
-        return False, "outside the scored window"
+    if not in_autonomous_trading_window(now_et):
+        return False, "outside the operator-authorized trading window"
     if now_et.weekday() >= 5:
         return False, "not a trading day"
     cutoff = entry_cutoff_et(now_et.date())
@@ -136,6 +140,12 @@ def profile(name: str) -> Profile:
 def in_scored_window(now: dt.datetime | None = None) -> bool:
     now = (now or dt.datetime.now(dt.timezone.utc)).astimezone(ET)
     return WINDOW_OPEN <= now < MEASUREMENT_END
+
+
+def in_autonomous_trading_window(now: dt.datetime | None = None) -> bool:
+    """Whether the sole production account may accept a new-entry decision."""
+    now = (now or dt.datetime.now(dt.timezone.utc)).astimezone(ET)
+    return WINDOW_OPEN <= now < AUTONOMOUS_TRADING_END
 
 
 def assert_paper(url: str) -> None:

@@ -28,3 +28,24 @@ def test_scored_window_boundaries():
     assert not config.in_scored_window(dt.datetime(2026, 9, 4, 9, 30, tzinfo=ET))
     # Friday is outside: the snapshot is at the opening bell.
     assert not config.in_scored_window(dt.datetime(2026, 9, 4, 9, 31, tzinfo=ET))
+
+
+def test_operator_authorized_window_includes_friday_then_expires_permanently():
+    ET = config.ET
+    assert config.in_autonomous_trading_window(
+        dt.datetime(2026, 9, 4, 9, 45, tzinfo=ET))
+    assert config.in_autonomous_trading_window(
+        dt.datetime(2026, 9, 4, 15, 59, tzinfo=ET))
+    assert not config.in_autonomous_trading_window(
+        dt.datetime(2026, 9, 4, 16, 0, tzinfo=ET))
+    assert not config.in_autonomous_trading_window(
+        dt.datetime(2026, 9, 8, 10, 0, tzinfo=ET))
+
+
+def test_friday_submission_uses_normal_intraday_cutoff():
+    ET = config.ET
+    assert config.entry_submission_allowed(
+        dt.datetime(2026, 9, 4, 15, 44, tzinfo=ET))[0]
+    allowed, reason = config.entry_submission_allowed(
+        dt.datetime(2026, 9, 4, 15, 45, tzinfo=ET))
+    assert not allowed and "15:45 ET" in reason

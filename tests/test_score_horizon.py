@@ -2,7 +2,7 @@ import datetime as dt
 
 import pytest
 
-from agent.config import ET, WINDOW_CLOSE
+from agent.config import AUTONOMOUS_TRADING_END, ET, WINDOW_CLOSE
 from agent.host.capabilities import Capabilities, CapabilityError
 from agent.quant import candidates as cd
 from agent.quant import measures as ms
@@ -29,6 +29,17 @@ def test_later_contract_is_evaluated_at_official_equity_mark():
     assert out["residual_calendar_days_at_evaluation"] == 8.0
     assert out["score_horizon_trading_days"] == pytest.approx(2.615385, abs=1e-6)
     assert "residual time value" in out["valuation_basis"]
+    assert out["horizon_kind"] == "official_score"
+
+
+def test_friday_post_submission_session_uses_friday_close_horizon():
+    now = dt.datetime(2026, 9, 4, 10, 0, tzinfo=ET)
+    out = score_horizon.candidate_horizon("2026-09-11", now)
+
+    assert out["evaluation_at"] == AUTONOMOUS_TRADING_END.isoformat(timespec="seconds")
+    assert out["horizon_kind"] == "post_submission_paper_session"
+    assert out["score_horizon_trading_days"] == pytest.approx(6 / 6.5, abs=1e-6)
+    assert "Friday post-submission" in out["valuation_basis"]
 
 
 def test_score_mark_retains_time_value_and_executable_spread():

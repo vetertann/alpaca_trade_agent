@@ -121,6 +121,16 @@ def test_preflight_uses_the_extended_final_session_wind_down():
         hour=15, minute=30)) == "ACTIVE"
 
 
+def test_preflight_labels_the_authorized_post_submission_session(tmp_path):
+    friday = dt.datetime(2026, 9, 4, 10, 0, tzinfo=preflight.ET)
+    bundle = build(tmp_path, now=friday)
+
+    assert bundle["clock"]["post_submission_session"] is True
+    assert bundle["clock"]["autonomous_trading_ends_at"].startswith(
+        "2026-09-04T16:00:00")
+    assert bundle["clock"]["hours_to_autonomous_trading_end"] == 6.0
+
+
 def test_daily_windows_remain_available_when_intraday_stream_is_warm(tmp_path,
                                                                      monkeypatch):
     class DailyRest(FakeRest):

@@ -42,12 +42,15 @@ def test_missing_expected_account_id_fails_closed():
     assert not r.passed and "not configured" in r.reason
 
 
-def test_competition_account_blocked_outside_window():
+def test_account_identity_is_independent_of_entry_window_so_exits_remain_possible():
     before = dt.datetime(2026, 8, 30, 12, 0, tzinfo=ET)
-    assert not gates.g_account_identity(
+    after = dt.datetime(2026, 9, 4, 16, 0, tzinfo=ET)
+    assert gates.g_account_identity(
         ACCOUNT, "competition", EXPECTED_ACCOUNT_ID, now=before).passed
     assert gates.g_account_identity(
         ACCOUNT, "competition", EXPECTED_ACCOUNT_ID, now=IN_WINDOW).passed
+    assert gates.g_account_identity(
+        ACCOUNT, "competition", EXPECTED_ACCOUNT_ID, now=after).passed
 
 
 def test_blocked_account_refused():

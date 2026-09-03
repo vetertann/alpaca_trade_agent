@@ -27,7 +27,7 @@ when the relevant execution semantics changed.
 ```bash
 cd /Users/ivan/Documents/Hackatons/Alpaca
 set -a; . ./.env; set +a
-.venv/bin/python -m pytest tests/ -q          # expect 510 passed
+.venv/bin/python -m pytest tests/ -q          # expect 515 passed
 alpaca version                                # v0.0.14; /usr/local/bin/alpaca on VM
 ```
 
@@ -94,15 +94,17 @@ PYTHONPATH=src .venv/bin/python -m agent.run \
   --profile competition --mode propose --once --run-dir .run/monday-dry
 ```
 
-Expect `account_identity: PASS` in the checklist. On Saturday the same call fails
-with *"competition account addressed outside the scored window"*, which is correct.
+Expect `account_identity: PASS` in the checklist. Identity deliberately remains
+independent of the entry window so an authorized exit can always reach the correct
+account; the separate submit-time gate refuses new entries outside the absolute
+operator window.
 
 ## 09:45 ET — go live
 
-On the server, which is where it should run for a four-day unattended window:
+On the server, which is where it should run unattended:
 
 ```bash
-./deploy/deploy.sh --profile competition --mode execute
+./deploy/deploy.sh --mode execute
 ```
 
 Or locally, if the server is not in play:
@@ -241,9 +243,13 @@ never expose credentials, raw environment values, or mutation endpoints; every
 
 ## Through the week
 
-- Entries are blocked before 09:45 and after 15:45 ET on normal sessions, and
-  outside the scored window. On the final Thursday only, new entries remain open
+- Entries are blocked before 09:45 and after 15:45 ET on normal sessions. On the
+  final scored Thursday only, new entries remain open
   until **15:55 ET**; the host checks this again immediately before broker submit.
+- One operator-authorized post-submission paper session runs Friday September 4
+  under the ordinary 09:45–15:45 ET entry window. The official score is already
+  fixed. At Friday 16:00 ET the absolute host window expires permanently: new
+  entries do not reopen next week, while exits and reconciliation remain available.
 - Thursday winds down from **15:55 ET**. Expiring structures still begin their
   separate mandatory liquidation protocol at 15:15 unless settlement is authorized;
   later-dated contracts may remain when their marked exposure is the deliberate

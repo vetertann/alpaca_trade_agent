@@ -2,7 +2,7 @@
 
 The trading agent listens on **no port**. It makes outbound connections only —
 websockets to Alpaca, HTTPS to the model providers, and gRPC to the OTel collector.
-The separate read-only demo panel binds `0.0.0.0` on TCP 3001; UFW permits that
+The separate read-only demo panel binds `0.0.0.0` on TCP 7001; UFW permits that
 port. The panel reads run artifacts only, exposes no credentials, rejects
 all `POST` requests, and cannot place or cancel a trade.
 
@@ -18,10 +18,10 @@ ssh -i ~/.ssh/alpaca_agent_vps root@185.102.78.75 'bash /tmp/provision.sh'
 scp -i ~/.ssh/alpaca_agent_vps .env root@185.102.78.75:/opt/alpaca-agent/.env
 ```
 
-## Competition deployment
+## Production deployment
 
 ```bash
-./deploy/deploy.sh --profile competition --mode execute
+./deploy/deploy.sh --mode execute
 ```
 
 `deploy.sh` targets `/opt/alpaca-agent` and restarts only
@@ -39,19 +39,25 @@ stream owner, so the live service remains the sole long-lived process.
 
 | Role | Unit | Directory | Arguments | Panel |
 |---|---|---|---|---|
-| judged competition account | `alpaca-agent.service` | `/opt/alpaca-agent` | competition, execute, high-variance tournament profile | `alpaca-panel.service`, 3001 |
+| production paper account | `alpaca-agent.service` | `/opt/alpaca-agent` | competition, execute, balanced 10% risk profile | `alpaca-panel.service`, 7001 |
 
 The agent and panel are separate services. The panel reads the run directory only
 and has no broker action path.
 
-The high-variance profile makes 10% of equity maximum loss available to a robust
-or directionally aligned position, permits 30% aggregate premium at risk, throttles
-new entries after 15% realised loss, and continues build reviews below 9% correlated
-scenario risk. These are ceilings, not forced allocations: quote, liquidity,
-economics, evidence, concentration, and resulting-book gates remain mandatory.
-The unit also selects the `high_variance` sizing posture, which tells the model to
-aim for 7–10% maximum-loss sizing when evidence is robust and to name a concrete
-reason when choosing less. The default posture remains `balanced`.
+The balanced profile caps robust, aligned-directional, single-position and correlated
+scenario risk at 10% of equity. Aggregate premium at risk is capped at 30%; the 3.5%
+build target schedules review but does not force deployment or impose a minimum
+position size. There is no realised-loss recovery multiplier. Quote, liquidity,
+economics, exact-candidate evidence, fresh-price, direction, concentration and
+resulting-book gates remain mandatory.
+
+The operator-authorized post-submission session ends Friday 4 September at 16:00 ET.
+The ordinary Friday entry cutoff is 15:45 ET. After the absolute end timestamp the
+host permanently refuses new entries; keeping the service enabled preserves exit,
+reconciliation and audit monitoring without reopening trading next week.
+Tier-2 cycles have no fixed per-session count cap; trigger debounce, event dedupe and
+the three-per-session blocked-trigger escalation cap still bound repeated work.
+Deterministic Tier-0 exits remain independent of model availability.
 
 ## Watching
 
@@ -60,7 +66,7 @@ ssh -i ~/.ssh/alpaca_agent_vps root@185.102.78.75 'journalctl -u alpaca-agent -f
 ssh -i ~/.ssh/alpaca_agent_vps root@185.102.78.75 'tail -f /opt/alpaca-agent/.run/agent.log'
 ```
 
-## Only one agent
+## Only one production instance
 
 Alpaca refuses a second stream connection per feed/account with 406, and the
 incumbent wins. Once the server unit is running, do not start a laptop process
@@ -87,15 +93,15 @@ returns 405.
 Locally:
 
 ```bash
-PYTHONPATH=src .venv/bin/python scripts/panel.py --run-dir .run/live --port 3001
+PYTHONPATH=src .venv/bin/python scripts/panel.py --run-dir .run/live --port 7001
 ```
 
 In the present hackathon paper-demo deployment:
 
 ```bash
-# competition: http://185.102.78.75:3001
+# competition: http://185.102.78.75:7001
 ```
 
 This is an unauthenticated public view of a paper account. For any non-demo use,
-change the unit to `--host 127.0.0.1`, close UFW 3001, and reach it through
+change the unit to `--host 127.0.0.1`, close UFW 7001, and reach it through
 an SSH tunnel or an authenticated reverse proxy.
