@@ -77,14 +77,12 @@ Also check the zero-bid share. Saturday: SPY 7%, QQQ 2.5%, **IWM 18%**. If IWM i
 still that thin, leave it out of the traded set.
 
 The chronological fill replay found **1.50% of equity** as the smallest historical
-admission anchor. The terminal scoring profile now deliberately uses a **25%** hard
-ceiling per position and a dynamic robust target of 20% plus twice durable realised
-loss, capped at that per-position ceiling. Its prod aggregate scenario, premium and
-build thresholds are 100% account boundaries, so earlier positions do not shrink a
-later robust entry merely through a tournament portfolio percentage. This is a
-high-variance tournament policy, not a replay optimum. It still cannot promote a
-partial/negative edge or bypass fresh-price, directional, liquidity, concentration,
-buying-power or exact-candidate evidence gates.
+admission anchor. Production now uses the ordinary balanced posture with **10%**
+robust, single-position, directional, and correlated-scenario ceilings. Aggregate
+premium at risk is capped at 30%, while the 3.5% build target is an observation and
+cycle trigger rather than a required allocation. No loss-recovery multiplier or
+minimum position size is applied. Fresh-price, directional, liquidity,
+concentration, buying-power, and exact-candidate evidence gates continue to bind.
 
 ## 09:40 ET — dry run on the competition account
 

@@ -965,31 +965,21 @@ profit divided by maximum loss and by `max(DTE, 1)`. This prevents a large credi
 raw dollar payoff from winning merely because it consumes more loss capital, while
 preserving the per-distribution sign test as the evidence threshold.
 
-### Terminal scoring posture
+### Deployed balanced posture
 
-The deployed scoring profile is intentionally loss-seeking relative to the balanced
-default, but its aggression is host-owned rather than rhetorical. Every robust
-finalist targets maximum loss equal to 20% of current equity plus twice the durable
-realised loss, capped by the configured 25% evidence and single-position ceilings.
-If host headroom can support the target, a request below 85% is returned as
-`reconsider_sizing`. Realised loss is used instead of unrealised P&L so quote noise
-cannot resize a proposed order from tick to tick.
+Production uses the balanced sizing posture. Robust evidence, single-position risk,
+aligned directional risk, and correlated-scenario loss are each capped at 10% of
+equity. Aggregate premium at risk is capped at 30%; the 3.5% build target schedules
+reassessment but does not force an entry or a minimum order size. Sizing therefore
+remains the model's evidence-backed choice inside host-owned ceilings.
 
-On the judged terminal profile, correlated-scenario loss, aggregate premium at risk,
-and the periodic build target are set to 100% of equity. At that value they are
-observational account boundaries rather than tournament sizing ceilings: repeated
-qualified entries are not cut merely because earlier positions already consume a
-portfolio-level percentage. Broker buying power and the 25% per-position ceiling
-remain hard constraints.
-
-An entry-oriented cycle also cannot terminate with `NO_TRADE` before a bounded scan
-has attempted vertical calls, evaluated a canonical debit bull-call spread when one
-is liquid, evaluated a genuinely different comparator, and ranked at least two
-candidates. This distinguishes a real bullish spread from a positive-delta straddle.
-The policy does not bypass exact-candidate evidence, fresh-price edge, directional
-alignment, liquidity, concentration or buying-power gates. Scenario and
-premium-at-risk accounting still run and remain visible, but their prod limits are
-account-sized rather than marginal deployment targets.
+There is no realised-loss recovery multiplier and no requirement to spend available
+headroom. The optional `terminal_push` posture remains covered as a dormant policy
+mode, but the production unit does not select it. Exact-candidate evidence,
+fresh-price edge, directional alignment, liquidity, concentration, buying-power,
+and scenario gates remain hard constraints. Scenario and
+premium-at-risk accounting still run, remain visible, and are enforced against the
+configured portfolio ceilings.
 
 ---
 
@@ -1606,7 +1596,7 @@ read-only paper-demo panel is a separate systemd service.
 
 | Role | Unit and directory | Configuration | Panel |
 |---|---|---|---|
-| judged competition account | `alpaca-agent.service`, `/opt/alpaca-agent` | competition, execute, 25% per-position terminal target; account-sized aggregate bounds | `alpaca-panel.service`, TCP 7001 |
+| judged competition account | `alpaca-agent.service`, `/opt/alpaca-agent` | competition, execute, balanced posture; 10% position/scenario ceilings | `alpaca-panel.service`, TCP 7001 |
 
 The services use the dedicated `alpaca` system user with `nologin`. Confinement includes
 `ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges`, `PrivateTmp`, a 1 GB agent
