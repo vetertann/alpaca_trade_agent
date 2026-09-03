@@ -9,7 +9,7 @@ the current operating instructions.
 The first-session rehearsal and live session are complete. The system has now
 observed live equity and option quotes, populated and restored its rolling series,
 submitted and cancelled orders, filled multi-leg entries and an exit, reconciled
-those fills after restarts, and enforced the 15:45 ET entry cutoff.
+those fills after restarts, and enforced the host-owned entry cutoff.
 
 The fill-denomination question is resolved by the durable broker ledger: across
 live verticals and condors, parent `filled_qty` equalled the submitted spread
@@ -27,7 +27,7 @@ when the relevant execution semantics changed.
 ```bash
 cd /Users/ivan/Documents/Hackatons/Alpaca
 set -a; . ./.env; set +a
-.venv/bin/python -m pytest tests/ -q          # expect 414 passed
+.venv/bin/python -m pytest tests/ -q          # expect 510 passed
 alpaca version                                # v0.0.14; /usr/local/bin/alpaca on VM
 ```
 
@@ -77,11 +77,14 @@ Also check the zero-bid share. Saturday: SPY 7%, QQQ 2.5%, **IWM 18%**. If IWM i
 still that thin, leave it out of the traded set.
 
 The chronological fill replay found **1.50% of equity** as the smallest historical
-admission anchor, but the deployed four-session contest policy is deliberately
-**4.0%**. The larger number is a forward policy choice, not a backtest optimum: it
-lets qualified P&L matter while remaining far below the former 10% comparator. Do
-not change it intraday because the current book is breached or because a rejected
-trade later would have made money.
+admission anchor. The terminal scoring profile now deliberately uses a **25%** hard
+ceiling per position and a dynamic robust target of 20% plus twice durable realised
+loss, capped at that per-position ceiling. Its prod aggregate scenario, premium and
+build thresholds are 100% account boundaries, so earlier positions do not shrink a
+later robust entry merely through a tournament portfolio percentage. This is a
+high-variance tournament policy, not a replay optimum. It still cannot promote a
+partial/negative edge or bypass fresh-price, directional, liquidity, concentration,
+buying-power or exact-candidate evidence gates.
 
 ## 09:40 ET — dry run on the competition account
 
@@ -119,7 +122,7 @@ The deployed topology is:
 
 | Account | Agent | Run directory | Panel |
 |---|---|---|---|
-| competition | `alpaca-agent.service` | `/opt/alpaca-agent/.run` | TCP 3001 |
+| competition | `alpaca-agent.service` | `/opt/alpaca-agent/.run` | TCP 7001 |
 
 Run exactly one process for the account. Alpaca refuses a second connection to the
 same feed/account with 406 and the incumbent wins. Shadow baselines remain inside
@@ -172,7 +175,7 @@ inspection tool must read the trace rather than open its own stream.
 ## The panel
 
 ```bash
-PYTHONPATH=src .venv/bin/python scripts/panel.py --run-dir .run/live --port 3001
+PYTHONPATH=src .venv/bin/python scripts/panel.py --run-dir .run/live --port 7001
 ```
 
 Left column: equity, P&L against the $100,000 start, session state, cycle count, an
@@ -204,6 +207,14 @@ fsynced in `.run/action_triggers.jsonl`, survives restart, and expires explicitl
 Removing a discretionary trigger cannot remove a mandatory exit or cancel a broker
 order that has already fired.
 
+Entry rows also show their host-bound signal mode and latest market label.
+`waiting_signal` means the executable price is acceptable but the live directional
+premise is not currently confirmed. One conflicting sample only waits; the default
+two consecutive conflicts terminate the rule as `invalidated_signal`. Candidate
+bias and expected move come from the exact recorded `risk.direction` evidence, and
+the host repeats the signal check immediately before crossing the broker-submit
+boundary.
+
 The execution-control strip also shows correlated portfolio scenario loss against
 the 4.0% host cap. `RISK-REDUCING ENTRIES ONLY` means the live book is over that
 cap: exits remain enabled, ordinary entries are refused, and only an exact candidate
@@ -225,15 +236,18 @@ baseline stuck at one trade after Tuesday means settlement is not firing and the
 comparison is measuring a single Monday position.
 
 Read-only and separate from the agent, so it cannot affect a trade. In the current
-paper-demo deployment the panel binds `0.0.0.0` on port 3001, and UFW permits that
+paper-demo deployment the panel binds `0.0.0.0` on port 7001, and UFW permits that
 port. It is unauthenticated and must
 never expose credentials, raw environment values, or mutation endpoints; every
 `POST` returns 405. For a non-demo deployment, bind loopback and use an SSH tunnel.
 
 ## Through the week
 
-- Entries are blocked before 09:45 and after 15:45 ET, and outside the scored window.
-- Thursday winds down from **15:00 ET**, not 15:45. Expiring structures flatten;
+- Entries are blocked before 09:45 and after 15:45 ET on normal sessions, and
+  outside the scored window. On the final Thursday only, new entries remain open
+  until **15:55 ET**; the host checks this again immediately before broker submit.
+- Thursday winds down from **15:55 ET**. Expiring structures still begin their
+  separate mandatory liquidation protocol at 15:15 unless settlement is authorized;
   later-dated contracts may remain when their marked exposure is the deliberate
   final-equity posture. Confirm that every such candidate used `vol.measures_for`.
 - On every expiry day, ordinary liquidation begins at **15:15 ET**. Holding beyond

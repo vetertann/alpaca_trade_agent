@@ -13,7 +13,8 @@ import hashlib
 import json
 import math
 
-from agent.config import ET, MEASUREMENT_END, WINDOW_CLOSE
+from agent.config import (ENTRY_OPEN_ET, ET, MEASUREMENT_END, WINDOW_CLOSE,
+                          entry_cutoff_et)
 from agent.brain import scheduled_events
 from agent.host.rest import Rest
 from agent.host.series import RollingSeries
@@ -412,9 +413,9 @@ def _session_state(et: dt.datetime, trading_day: bool = True) -> str:
     t = et.time()
     if t < dt.time(9, 30) or t >= dt.time(16, 0):
         return "CLOSED"
-    if t < dt.time(9, 45):
+    if t < ENTRY_OPEN_ET:
         return "WARM_UP"
-    wind = dt.time(15, 0) if et.date() == WINDOW_CLOSE.date() else dt.time(15, 45)
+    wind = entry_cutoff_et(et.date())
     if t >= wind:
         return "WINDING_DOWN"
     return "ACTIVE"

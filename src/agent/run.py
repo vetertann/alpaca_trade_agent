@@ -14,12 +14,12 @@ from dataclasses import replace
 
 from agent.brain import preflight, prompt, providers
 from agent.brain.shadow import ShadowRunner
-from agent.brain.loop import (ANCHORS, DEBOUNCE_SECONDS, MAX_CYCLES_PER_SESSION,
-                              Trigger, TriggerState,
+from agent.brain.loop import (ANCHORS, DEBOUNCE_SECONDS, Trigger, TriggerState,
                               entries_allowed, position_exit_due, session_state)
 from agent.config import ET, WINDOW_CLOSE, load_env, profile
 from agent.host.capabilities import Capabilities
 from agent.host.action_triggers import ActionTriggerStore, intent_from_dict
+from agent.host import entry_signal
 from agent.host.execution import Executor
 from agent.host.exit_policy import ExitPolicyStore
 from agent.host.ledger import ExecutionLedger, TERMINAL_STATUSES
@@ -47,7 +47,13 @@ def _failing_line(code: str, stderr: str) -> str:
 
 MEGACAPS = ["NVDA", "AAPL", "MSFT", "TSLA", "AMZN", "GOOGL", "META"]
 TRADED = ["SPY", "QQQ", "IWM"]
-CYCLE_BUDGET_S = 90.0
+# A generated analysis program may legitimately enumerate and score several
+# option families through host RPC.  Ninety seconds proved too tight in live
+# sessions: otherwise healthy programs were killed after only a handful of
+# expensive, bounded capability calls.  This limit is per program/round, not a
+# cycle-wide deadline.  Tier-0 exits run on their own monitor thread and remain
+# independent of model and sandbox latency.
+PROGRAM_BUDGET_S = 180.0
 MAX_ROUNDS = 3
 CONFIRMATION_REFRESH_AFTER_S = 15.0
 TRIGGER_IV_REFRESH_SECONDS = 60.0
@@ -203,9 +209,12 @@ class Agent:
             f"{run_dir}/settlement_authorizations.jsonl")
         self.executor = Executor(self.rest, self.params, profile_name, mode=mode,
                                  ledger=self.ledger, enforce_entry_risk=True,
-                                 sizing_posture=sizing_posture)
+                                 sizing_posture=sizing_posture,
+                                 submission_clock=lambda: dt.datetime.now(
+                                     dt.timezone.utc))
         self.triggers = TriggerState()
-        self.sandbox = Sandbox(self._dispatch, workdir=run_dir, timeout_s=CYCLE_BUDGET_S)
+        self.sandbox = Sandbox(
+            self._dispatch, workdir=run_dir, timeout_s=PROGRAM_BUDGET_S)
         self.provider = providers.for_role("decision", dev=dev_models, max_tokens=8000)
         self.previous_bundle: dict | None = None
         self._portfolio_lock = threading.RLock()
@@ -422,10 +431,6 @@ class Agent:
         while self._pending_triggers:
             key, trigger = self._pending_triggers.popleft()
             self._pending_trigger_keys.discard(key)
-            if self.triggers.cycles_this_session >= MAX_CYCLES_PER_SESSION:
-                self.trace.note("trigger_suppressed", trigger=trigger.name,
-                                reason="session cycle cap reached")
-                continue
             if trigger.exempt_from_debounce:
                 return trigger
             if self.triggers._debounced(now):
@@ -792,6 +797,15 @@ class Agent:
             self.trace.order({**out, "execution_path": "host_action_trigger",
                               "trigger_purpose": purpose})
             return
+        if status == "entry_window_closed":
+            reason = str(out.get("reason") or "entry window closed")
+            store.state(trigger_id, "expired", result=summary,
+                        last_evaluation_status="expired",
+                        last_evaluation_reason=reason,
+                        last_evaluated_at=now.astimezone(dt.timezone.utc).isoformat())
+            self.trace.note("action_trigger_expired", trigger_id=trigger_id,
+                            purpose=purpose, reason=reason, result=summary)
+            return
         if status == "blocked":
             failures = list(out.get("failed_gates") or [])
             reason = str(out.get("reason") or
@@ -818,14 +832,10 @@ class Agent:
                 return
             escalation_count = self._blocked_trigger_escalations_this_session(now)
             escalation_queued = (
-                escalation_count < MAX_BLOCKED_TRIGGER_ESCALATIONS_PER_SESSION
-                and self.triggers.cycles_this_session < MAX_CYCLES_PER_SESSION)
+                escalation_count < MAX_BLOCKED_TRIGGER_ESCALATIONS_PER_SESSION)
             suppressed_reason = ""
             if not escalation_queued:
-                suppressed_reason = (
-                    "session cycle cap reached"
-                    if self.triggers.cycles_this_session >= MAX_CYCLES_PER_SESSION
-                    else "blocked-trigger escalation cap reached")
+                suppressed_reason = "blocked-trigger escalation cap reached"
             store.state(trigger_id, "blocked_risk", result=summary,
                         last_evaluation_status="blocked_risk",
                         last_evaluation_reason=reason,
@@ -853,6 +863,15 @@ class Agent:
                 value=float(value) if value is not None else None,
                 reason=str(out.get("reason") or "fresh price no longer qualifies"))
             return
+        if status == "signal_not_met":
+            verdict = dict(out.get("signal_verdict") or {})
+            self._record_trigger_evaluation(
+                trigger,
+                ("waiting_data" if verdict.get("status") == "waiting_data"
+                 else "waiting_signal"),
+                now, reason=str(out.get("reason") or
+                                "fresh entry signal no longer qualifies"))
+            return
         if status in ("rejected", "mismatch", "failed", "proposed"):
             reason = str(out.get("reason") or status)
             store.state(trigger_id, "failed", result=summary,
@@ -865,6 +884,89 @@ class Agent:
         self._record_trigger_evaluation(
             trigger, status or "unknown", now,
             reason=str(out.get("reason") or "unclassified host outcome"))
+
+    def _sample_entry_signal(self, trigger: dict, spot: float,
+                             now: dt.datetime, *, final_check: bool = False
+                             ) -> tuple[bool, dict]:
+        """Persist one host signal sample and say whether submission may proceed."""
+        store = self.action_triggers
+        trigger_id = str(trigger["trigger_id"])
+        policy = dict(trigger.get("signal_policy") or {})
+        utc_now = now.astimezone(dt.timezone.utc)
+        if not final_check and trigger.get("last_signal_sample_at"):
+            sampled = dt.datetime.fromisoformat(
+                str(trigger["last_signal_sample_at"])).astimezone(dt.timezone.utc)
+            interval = float(policy.get("sample_interval_seconds") or 1.0)
+            if (utc_now - sampled).total_seconds() < interval:
+                return False, {"status": "sample_interval",
+                               "reason": "waiting for the next signal sample"}
+        contexts = self.series.directional_contexts(
+            {"SPY", "QQQ", "IWM",
+             str((trigger.get("intent") or {}).get("underlying") or "").upper()},
+            utc_now)
+        symbol = str((trigger.get("intent") or {}).get("underlying") or "").upper()
+        verdict = entry_signal.evaluate(policy, contexts.get(symbol), spot)
+        if final_check:
+            if verdict.get("status") != "passed":
+                self._record_trigger_evaluation(
+                    trigger,
+                    ("waiting_data" if verdict.get("status") == "waiting_data"
+                     else "waiting_signal"),
+                    now, value=float(spot), reason=str(verdict.get("reason") or
+                                                       "signal did not pass"))
+            return verdict.get("status") == "passed", verdict
+
+        common = {
+            "last_signal_sample_at": utc_now.isoformat(),
+            "last_signal_verdict": verdict,
+            "last_observed_value": round(float(spot), 6),
+            "last_observed_at": utc_now.isoformat(),
+            "last_evaluated_at": utc_now.isoformat(),
+        }
+        if verdict.get("status") == "passed":
+            store.state(
+                trigger_id, "active", signal_conflict_hits=0,
+                last_evaluation_status="signal_passed",
+                last_evaluation_reason=str(verdict.get("reason") or "signal passed"),
+                **common)
+            return True, verdict
+        if verdict.get("status") == "waiting_data":
+            store.state(
+                trigger_id, "active", signal_conflict_hits=0,
+                last_evaluation_status="waiting_data",
+                last_evaluation_reason=str(verdict.get("reason") or
+                                           "signal data unavailable"),
+                **common)
+            return False, verdict
+        if verdict.get("status") == "conflicted":
+            hits = int(trigger.get("signal_conflict_hits") or 0) + 1
+            required = int(policy.get("confirmation_samples") or 2)
+            if hits >= required:
+                store.state(
+                    trigger_id, "invalidated_signal", signal_conflict_hits=hits,
+                    last_evaluation_status="invalidated_signal",
+                    last_evaluation_reason=str(verdict.get("reason") or
+                                               "entry signal invalidated"),
+                    **common)
+                self.trace.note(
+                    "action_trigger_signal_invalidated", trigger_id=trigger_id,
+                    signal_verdict=verdict, confirmed_samples=hits)
+                return False, verdict
+            store.state(
+                trigger_id, "active", signal_conflict_hits=hits,
+                last_evaluation_status="waiting_signal",
+                last_evaluation_reason=(
+                    f"signal conflict confirmed {hits}/{required}: "
+                    f"{verdict.get('reason') or 'conflict'}"),
+                **common)
+            return False, verdict
+        store.state(
+            trigger_id, "active", signal_conflict_hits=0,
+            last_evaluation_status="waiting_signal",
+            last_evaluation_reason=str(verdict.get("reason") or
+                                       "entry signal is not ready"),
+            **common)
+        return False, verdict
 
     def _evaluate_action_triggers(self, now: dt.datetime) -> list[dict]:
         """Evaluate durable one-shot authorizations without a model round."""
@@ -973,9 +1075,18 @@ class Agent:
                                if condition["kind"] == "max_entry_debit" else
                                net < 0 and -net + 1e-9 >= float(condition["value"]))
                         if not hit:
+                            if int(trigger.get("signal_conflict_hits") or 0):
+                                store.state(
+                                    trigger_id, "active", signal_conflict_hits=0,
+                                    last_signal_sample_at=None,
+                                    last_signal_verdict=None)
                             self._record_trigger_evaluation(
                                 trigger, "waiting_price", now, value=observed,
                                 reason="executable entry price has not reached the authorization")
+                            continue
+                        signal_passed, signal_verdict = self._sample_entry_signal(
+                            trigger, float(spot), now)
+                        if not signal_passed:
                             continue
                         account = self.rest.account()
                         positions = self.rest.positions()
@@ -992,11 +1103,26 @@ class Agent:
                         spots = {symbol: float(self.series.last(symbol) or
                                  self.rest.stock_latest_trade(symbol)["p"])
                                  for symbol in underlyings}
+                        # Executor calls this after its own fresh materialisation,
+                        # immediately before crossing the durable submit boundary.
+                        def revalidate_signal():
+                            checked_at = dt.datetime.now(ET)
+                            final_spot = float(
+                                self.series.last(intent.underlying) or
+                                self.rest.stock_latest_trade(intent.underlying)["p"])
+                            _, verdict = self._sample_entry_signal(
+                                store.current()[trigger_id], final_spot, checked_at,
+                                final_check=True)
+                            return verdict
+
                         out = self.executor.execute_authorized(
                             intent, trigger_id=trigger_id,
                             economic_condition=condition,
                             authorization_deadline=dt.datetime.fromisoformat(
                                 str(trigger["expires_at"])), now=utc_now,
+                            signal_policy=trigger.get("signal_policy") or {},
+                            signal_verdict=signal_verdict,
+                            signal_revalidator=revalidate_signal,
                             equity=float(account["equity"]),
                             open_premium_at_risk=risk["premium_at_risk"],
                             realised_loss=risk["realised_loss"],
@@ -2011,16 +2137,6 @@ class Agent:
                         allocation_target_risk_pct=self.build_target_risk_pct,
                         portfolio_snapshot=portfolio_snapshot,
                         trading_day=trading_day)
-                # Defence in depth: no Tier-2 source (including startup and
-                # restart-rebaseline paths) may exceed the session cycle budget.
-                # Deterministic Tier-0 exits run in the independent exit monitor
-                # and remain outside model availability and cycle accounting.
-                if (trig is not None
-                        and self.triggers.cycles_this_session
-                        >= MAX_CYCLES_PER_SESSION):
-                    self.trace.note("trigger_suppressed", trigger=trig.name,
-                                    reason="session cycle cap reached")
-                    trig = None
                 cycle_outside_entry_window = (
                     trig is not None and trig.name in
                     ("deployment_floor", "fill_update", "assignment",

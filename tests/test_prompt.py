@@ -46,6 +46,8 @@ def test_prompt_has_one_batched_discovery_to_stage_example():
     assert "vol.measures_for(" in example
     assert "sigma=sigma" in example
     assert "vol.evaluate_many(" in example
+    assert "MAX_DISTRIBUTION_CANDIDATES = 12" in example
+    assert "limit=48" in example
     assert "vol.rank(" in example
     assert "market.directional_context(" in example
     assert "risk.direction(" in example
@@ -56,6 +58,7 @@ def test_prompt_has_one_batched_discovery_to_stage_example():
     assert "Never call `trading.execute` more than once" in s
     assert "There is no calendar cutoff" in s
     assert "limit=240" in s
+    assert "at most 12 shortlisted ids per batch" in s
 
 
 def test_canonical_discovery_example_is_valid_python():
@@ -148,7 +151,7 @@ def test_scaled_balanced_preserves_selection_and_only_scales_best_evidence():
     assert "terminal raw-P&L push" not in scaled
 
 
-def test_terminal_push_renders_one_shot_target_and_accepts_25_percent_bounds():
+def test_terminal_push_accepts_bounded_prod_risk_profile():
     terminal = prompt.system_prompt(
         robust_risk_pct=0.25,
         scenario_risk_pct=0.25,
@@ -159,16 +162,18 @@ def test_terminal_push_renders_one_shot_target_and_accepts_25_percent_bounds():
         build_target_risk_pct=0.20,
         sizing_posture="terminal_push",
     )
-    assert "target 20% of equity maximum loss" in terminal
-    assert "configured 25% ceiling" in terminal
-    assert "only one terminal-sized submission" in terminal
+    assert "host target is 20% of equity maximum loss" in terminal
+    assert "configured 25% evidence" in terminal
+    assert "true bullish debit call spread" in terminal
+    assert "must perform this bounded comparison" in terminal
+    assert "one terminal-sized submission" in terminal
     assert "ordinary robust entries revert to a 4% ceiling" in terminal
     assert "Maximum loss is only a safety boundary" in terminal
     assert "expected_profit_by_measure" in terminal
     assert "previewed whole-contract quantity" in terminal
     assert "largest robust executable terminal-equity impact" in terminal
     assert "later-dated option is eligible only" in terminal
-    assert "the 60% portfolio" in terminal
+    assert "25%-of-equity resulting-" in terminal
     assert "{{" not in terminal
 
 
@@ -191,7 +196,7 @@ def test_risk_variant_cannot_exceed_the_host_single_position_cap():
 def test_scenario_variant_has_a_host_bound():
     import pytest
     with pytest.raises(ValueError, match="scenario_risk_pct"):
-        prompt.system_prompt(scenario_risk_pct=0.26)
+        prompt.system_prompt(scenario_risk_pct=1.01)
 
 
 def test_version_changes_with_the_layer_set():

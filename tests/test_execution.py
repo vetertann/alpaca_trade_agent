@@ -427,6 +427,27 @@ def test_two_phase_submits_only_on_confirm():
     assert out["status"] == "submitted" and len(rest.submitted) == 1
 
 
+def test_submit_boundary_refuses_entry_when_time_window_closed(monkeypatch):
+    ex, rest = make()
+    ex.materialise(vertical(), equity=100_000, now=NOW)
+    monkeypatch.setattr(
+        "agent.host.execution.entry_submission_allowed",
+        lambda _now=None: (False, "new entries closed at 15:55 ET"),
+    )
+    out = ex.confirm(vertical(), equity=100_000, now=NOW)
+    assert out["status"] == "entry_window_closed"
+    assert rest.submitted == []
+
+
+def test_submit_boundary_uses_fresh_clock_not_cycle_time():
+    ex, rest = make()
+    ex.submission_clock = lambda: dt.datetime(2026, 9, 3, 15, 55, tzinfo=ET)
+    ex.materialise(vertical(), equity=100_000, now=NOW)
+    out = ex.confirm(vertical(), equity=100_000, now=NOW)
+    assert out["status"] == "entry_window_closed"
+    assert rest.submitted == []
+
+
 def test_confirmation_reprices_and_can_only_reduce_the_reviewed_quantity():
     ex, rest = make()
     staged = ex.materialise(vertical(risk_budget=1350), equity=100_000, now=NOW)
@@ -594,6 +615,100 @@ def test_quote_ttl_lapse_reprices_inside_live_economic_authorization():
     assert len(rest.submitted) == 1
 
 
+def test_execute_if_rechecks_canonical_signal_policy_before_submit():
+    ex, rest = make()
+    condition = {"kind": "max_entry_debit", "value": 3.0}
+    policy = {
+        "schema_version": 1, "mode": "momentum_continuation",
+        "requested_mode": "auto", "candidate_bias": "bullish",
+        "directionality": "direction-led", "analysis_classification": "bullish",
+        "reference_spot": 772.0, "expected_move": 6.0,
+        "max_adverse_move_em": 0.15, "confirmation_samples": 2,
+        "sample_interval_seconds": 1.0,
+    }
+    ex.begin_cycle("cycle-signal")
+    ex.begin_program(1)
+    staged = ex.execute(
+        vertical(), economic_condition=condition, authorization_seconds=30,
+        signal_policy=policy,
+        signal_verdict={"status": "passed"}, equity=100_000, now=NOW)
+    assert staged["status"] == "staged"
+    assert staged["confirmation_call"]["kwargs"]["entry_mode"] == "auto"
+
+    ex.begin_program(2)
+    waiting = ex.execute(
+        vertical(), economic_condition=condition, authorization_seconds=30,
+        signal_policy=policy,
+        signal_verdict={"status": "waiting_signal",
+                        "reason": "current label is neutral"},
+        equity=100_000, now=NOW + dt.timedelta(seconds=1))
+    assert waiting["status"] == "signal_not_met"
+    assert rest.submitted == []
+    assert ex.latest_staged is not None
+
+    ex.begin_program(3)
+    submitted = ex.execute(
+        vertical(), economic_condition=condition, authorization_seconds=30,
+        signal_policy=policy,
+        signal_verdict={"status": "passed", "reason": "bullish remains aligned"},
+        equity=100_000, now=NOW + dt.timedelta(seconds=2))
+    assert submitted["status"] == "submitted"
+    assert len(rest.submitted) == 1
+
+
+def test_changed_signal_policy_cannot_confirm_an_existing_draft():
+    ex, rest = make()
+    condition = {"kind": "max_entry_debit", "value": 3.0}
+    momentum = {"mode": "momentum_continuation", "candidate_bias": "bullish"}
+    pullback = {"mode": "pullback_entry", "candidate_bias": "bullish"}
+    ex.begin_cycle("cycle-signal-hash")
+    ex.begin_program(1)
+    assert ex.execute(
+        vertical(), economic_condition=condition, authorization_seconds=30,
+        signal_policy=momentum, signal_verdict={"status": "passed"},
+        equity=100_000, now=NOW)["status"] == "staged"
+
+    ex.begin_program(2)
+    changed = ex.execute(
+        vertical(), economic_condition=condition, authorization_seconds=30,
+        signal_policy=pullback, signal_verdict={"status": "passed"},
+        equity=100_000, now=NOW + dt.timedelta(seconds=1))
+    assert changed["status"] == "staged"
+    assert rest.submitted == []
+    assert ex.latest_staged.signal_policy == pullback
+
+
+def test_execute_if_uses_post_materialisation_signal_callback():
+    ex, rest = make()
+    condition = {"kind": "max_entry_debit", "value": 3.0}
+    policy = {"mode": "momentum_continuation", "candidate_bias": "bullish"}
+    calls = []
+
+    def current_signal():
+        calls.append("checked")
+        return {"status": "waiting_signal", "reason": "move reversed during refresh"}
+
+    ex.begin_cycle("cycle-late-signal")
+    ex.begin_program(1)
+    assert ex.execute(
+        vertical(), economic_condition=condition, authorization_seconds=30,
+        signal_policy=policy, signal_verdict={"status": "passed"},
+        signal_revalidator=current_signal,
+        equity=100_000, now=NOW)["status"] == "staged"
+    assert calls == [], "the fire-time callback is not part of draft construction"
+
+    ex.begin_program(2)
+    out = ex.execute(
+        vertical(), economic_condition=condition, authorization_seconds=30,
+        signal_policy=policy, signal_verdict={"status": "passed"},
+        signal_revalidator=current_signal,
+        equity=100_000, now=NOW + dt.timedelta(seconds=1))
+    assert out["status"] == "signal_not_met"
+    assert out["signal_verdict"]["reason"] == "move reversed during refresh"
+    assert calls == ["checked"]
+    assert rest.submitted == []
+
+
 def test_changed_intent_replaces_the_only_cycle_draft():
     ex, _ = make()
     ex.begin_cycle("cycle-1")
@@ -635,7 +750,16 @@ def audited_caps(tmp_path, *, trigger="session_anchor"):
                           EXP.isoformat(), list(intent.legs), 2.7, 270.0, 230.0,
                           5.0, 1.0)
     thesis.evidence_refs.append(candidate.id)
-    caps = Capabilities(rest, object(), theses, ex, RP, equity=100_000,
+    class Series:
+        def last(self, _symbol):
+            return 772.0
+
+        def directional_contexts(self, symbols, _now=None):
+            return {str(symbol).upper(): {
+                "classification": "bullish", "strength": "strong",
+            } for symbol in symbols}
+
+    caps = Capabilities(rest, Series(), theses, ex, RP, equity=100_000,
                         trigger={"name": trigger})
     caps._candidates[candidate.id] = candidate
     signature = caps._candidate_signature(candidate)
@@ -676,6 +800,8 @@ def test_lag_aware_entry_uses_the_same_presubmit_hooks(tmp_path):
 
 def test_presubmit_hooks_are_bound_to_exact_candidate_and_measure(tmp_path):
     caps, ex, intent, candidate, signature = audited_caps(tmp_path)
+    intent = TradeIntent(intent.underlying, intent.family, intent.legs,
+                         intent.thesis_id, 3_000.0)
     caps._measure_context["m"] = {"symbol": "SPY", "sigma": 0.1, "days": 2.0}
     caps._evaluated.append({"candidate": candidate.id, "signature": signature,
                             "handle": "m", "result": {"edge_median": 0.1}})
@@ -690,7 +816,16 @@ def test_presubmit_hooks_are_bound_to_exact_candidate_and_measure(tmp_path):
     caps._direction_checked.append({"candidate": candidate.id,
                                     "signature": signature,
                                     "sigma": 0.1, "days": 2.0,
-                                    "result": {"pnl_if_expired_now": 1}})
+                                    "result": {
+                                        "pnl_if_expired_now": 1,
+                                        "spot": 772.0, "expected_move": 6.88,
+                                        "candidate_bias": "bullish",
+                                        "directionality": "direction-led",
+                                        "directional_alignment": "aligned",
+                                        "market_direction": {
+                                            "classification": "bullish",
+                                            "strength": "strong"},
+                                    }})
     out = caps._trading_execute(intent_json(intent))
     assert out["status"] == "needs_price_authorization"
     assert ex.latest_staged is None
@@ -1097,7 +1232,8 @@ def test_confirmed_absent_retry_reuses_exact_id_and_body(tmp_path):
     ledger = ExecutionLedger(tmp_path / "execution.jsonl")
     rest = MissingThenAcceptRest()
     ex = Executor(rest, RP, "competition", mode="execute", ledger=ledger,
-                  expected_account_id=EXPECTED_ACCOUNT_ID)
+                  expected_account_id=EXPECTED_ACCOUNT_ID,
+                  submission_clock=lambda: NOW)
     ex.materialise(vertical(), equity=100_000, now=NOW)
     out = ex.confirm(vertical(), equity=100_000, now=NOW)
     coid = out["client_order_id"]

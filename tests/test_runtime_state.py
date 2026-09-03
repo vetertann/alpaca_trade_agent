@@ -39,7 +39,7 @@ def test_fresh_same_session_runtime_state_roundtrips_without_staged_drafts(tmp_p
     assert "staged" not in json.dumps(raw).lower()
 
     restarted = bare_agent(tmp_path)
-    assert restarted._restore_runtime_state(et(1, 11, 5))
+    assert restarted._restore_runtime_state(et(1, 11, 3))
     assert restarted.starting_equity == 100_000
     assert restarted.previous_bundle["bundle_hash"] == "abc"
     assert restarted.triggers.baseline["SPY"]["spot"] == 100

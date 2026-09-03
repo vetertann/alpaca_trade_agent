@@ -153,7 +153,10 @@ vol.evaluate_many(candidate_ids, measure_handle)
        Use one batch per compatible `evaluation_at` group rather than spending one
        host round trip per candidate. The broad pass omits the optional three-way
        score-horizon IV sensitivity sweep; call `vol.evaluate` on the finalist to
-       attach that evidence before staging.
+       attach that evidence before staging. This is an expensive Monte Carlo pass:
+       the host accepts at most 12 shortlisted ids per batch and 18 unique evaluated
+       candidates over the whole decision cycle. Filter first; repeated small calls
+       do not create more budget.
 vol.rank(candidate_ids, measure_handle, top_k=3)
     -> {basis, ranks, score_median, stable_top, stability}
        Ranking basis is expected profit / maximum loss / max(days to evaluation, 1),
@@ -278,7 +281,10 @@ trading.execute(intent)
        {status: "restaged", reason, checklist}
 
 trading.execute_if(intent, max_entry_debit=None, min_entry_credit=None,
-                   valid_for_seconds=30)
+                   valid_for_seconds=30, entry_mode="auto",
+                   max_adverse_move_em=0.15,
+                   signal_confirmation_samples=2,
+                   signal_sample_interval_seconds=1)
     -> the same two-phase and evidence-gated entry, but exactly one executable
        price boundary is part of the staged intent. Use `max_entry_debit` for a
        debit structure or `min_entry_credit` for a credit structure; values are
@@ -287,6 +293,12 @@ trading.execute_if(intent, max_entry_debit=None, min_entry_credit=None,
        The 5–120 second authorization begins when staged and is never extended by
        a slow review turn. Returns `condition_not_met` or `condition_expired`
        without submitting when the reviewed economics have gone away.
+       The host also binds a signal policy to the exact candidate and rechecks it
+       immediately before submission. `auto` maps direction-led candidates to
+       `momentum_continuation` and volatility-led/neutral candidates to
+       `direction_agnostic`; use `pullback_entry` only when the written thesis
+       explicitly intends a bounded pullback. Bias, expected move and current
+       classification are host-derived, never model-supplied.
     -> a staged result includes `confirmation_call`. In the later model program,
        call `trading.execute_if` again with the identical intent and every kwarg
        in that recipe. Calling `trading.execute` cannot confirm a conditional
@@ -316,13 +328,22 @@ trading.close_if(structure_id, min_executable_profit, reason)
 
 trading.set_entry_trigger(intent, max_entry_debit=None, min_entry_credit=None,
                           valid_for_seconds=60, max_spot_drift_pct=0.3,
+                          entry_mode="auto", max_adverse_move_em=0.15,
+                          signal_confirmation_samples=2,
+                          signal_sample_interval_seconds=1,
                           reason="...")
     -> after the same exact-candidate evidence and thesis checks, durably authorize
        one entry for 5–120 seconds. Supply exactly one price boundary. Tier 0
        watches it once per second, refuses it if the underlying moves more than
        `max_spot_drift_pct` percent from authorization, and re-runs fresh quotes,
        account, scenario, concentration and sizing gates before a deterministic,
-       idempotent submission. Arming is the market action for this cycle.
+       idempotent submission. It also requires the candidate-bound signal policy
+       to remain true: momentum waits for an aligned current label; a pullback may
+       be neutral while its adverse move stays bounded; direction-agnostic
+       volatility entries do not require a trend label. One conflicting sample
+       waits, while `signal_confirmation_samples` consecutive conflicts terminate
+       the authorization as `invalidated_signal`. The complete signal policy is
+       part of the trigger hash. Arming is the market action for this cycle.
 
 trading.set_exit_trigger(structure_id, min_executable_profit=None,
                          spot_above=None, spot_below=None,
@@ -342,7 +363,7 @@ trading.remove_trigger(trigger_id, reason)
 trading.list_triggers()
     -> active trigger records. `obs.portfolio.action_triggers` also retains recent
        terminal outcomes for ten minutes, including `blocked_risk`, `fired`,
-       `failed`, `expired` and `cancelled`, with the last labelled evaluation,
+       `invalidated_signal`, `failed`, `expired` and `cancelled`, with the last labelled evaluation,
        failed host gates, observation and seconds remaining. `blocked_risk` is
        reserved for durable risk refusals and terminal for that authorization;
        `waiting_data` is an active transient quote/spread retry with host backoff.
@@ -384,7 +405,7 @@ An intent is: `{underlying, family, legs, thesis_id, risk_budget}`.
 Write `exit_time` as `YYYY-MM-DD HH:MM ET`. The host normalizes and enforces that
 deadline. Independently, every option structure is closed from 15:15 ET on its
 earliest expiry unless a standing settlement authorization passes every live
-revalidation. The final Thursday wind-down begins at 15:00 ET, but
+revalidation. The final Thursday wind-down begins at 15:55 ET, and
 it does not mechanically liquidate later-dated options: total marked equity is
 the score, and crossing the exit spread merely to convert a mark to cash can hurt it.
 
@@ -463,21 +484,23 @@ def discover():
     # The full chain and evaluation table remain inside this program.  Only the
     # compact coverage and top-per-expiry summary printed below enters the next
     # model turn.
-    search = options.enumerate(symbol, expiries[0], expiries[-1], limit=240)
+    search = options.enumerate(symbol, expiries[0], expiries[-1], limit=48)
     if not search["candidates"]:
         return decision.no_trade(
             "options.enumerate returned no liquidity-gated candidates")
 
-    # Preserve the full calendar while bounding the expensive distribution pass:
-    # the host has already rotated families within each expiry, so the first four
-    # rows per date are a compact, diverse screen rather than a nearest-expiry cap.
-    sampled_by_expiry = {}
-    for candidate in search["candidates"]:
-        bucket = sampled_by_expiry.setdefault(candidate["expiry"], [])
-        if len(bucket) < 4:
-            bucket.append(candidate)
-    analysis_candidates = [candidate for rows in sampled_by_expiry.values()
-                           for candidate in rows]
+    # Enumeration is cheap; distribution evaluation is not. Pick at most twelve
+    # rows from the already expiry/family-diverse result, spaced across the whole
+    # returned catalogue. Never evaluate every family in every expiry bucket.
+    MAX_DISTRIBUTION_CANDIDATES = 12
+    candidates = search["candidates"]
+    if len(candidates) <= MAX_DISTRIBUTION_CANDIDATES:
+        analysis_candidates = candidates
+    else:
+        indices = [round(i * (len(candidates) - 1)
+                         / (MAX_DISTRIBUTION_CANDIDATES - 1))
+                   for i in range(MAX_DISTRIBUTION_CANDIDATES)]
+        analysis_candidates = [candidates[i] for i in dict.fromkeys(indices)]
 
     expected_measures = {"lognormal", "block_bootstrap", "student_t"}
     by_id = {candidate["id"]: candidate for candidate in analysis_candidates}
@@ -614,7 +637,9 @@ then calls `trading.execute(intent)` once.
 - Zero-bid legs are refused. A contract you cannot sell turns bounded maximum loss
   into certain loss.
 - Maximum four legs, one underlying per structure.
-- Entries are blocked in the first ten minutes of the session and after 15:45 ET.
+- Entries are blocked in the first fifteen minutes of the session and after 15:45 ET
+  on normal days. On the final Thursday, the entry cutoff is 15:55 ET and is
+  enforced again by the host immediately before broker submission.
   Exits are never blocked.
 - The book must reach its final posture by Thursday 3 September, 16:00 ET.
 

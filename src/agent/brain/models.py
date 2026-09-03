@@ -43,7 +43,6 @@ GPT_56_SOL  = ModelSpec("openai", "gpt-5.6-sol",   "OPENAI_API_KEY",
 GPT_55      = ModelSpec("openai", "gpt-5.5",       "OPENAI_API_KEY")
 GPT_54      = ModelSpec("openai", "gpt-5.4",       "OPENAI_API_KEY")
 GPT_54_MINI = ModelSpec("openai", "gpt-5.4-mini",  "OPENAI_API_KEY")
-GPT_OSS     = ModelSpec("nebius", "openai/gpt-oss-120b",     "NEBIUS_API_KEY", NEBIUS)
 KIMI_K3     = ModelSpec("nebius", "moonshotai/Kimi-K3",      "NEBIUS_API_KEY", NEBIUS,
                         request_timeout_s=150.0)
 QWEN_397B   = ModelSpec("nebius", "Qwen/Qwen3.5-397B-A17B",  "NEBIUS_API_KEY", NEBIUS)
@@ -55,14 +54,14 @@ QWEN_397B   = ModelSpec("nebius", "Qwen/Qwen3.5-397B-A17B",  "NEBIUS_API_KEY", N
 CHAINS: dict[str, list[ModelSpec]] = {
     # Production roles, used in the scored window. GPT-5.6 Sol is primary after
     # passing the real JSON/Python adapter contract locally. Opus and Kimi remain
-    # heterogeneous fallbacks; GPT-OSS is the final independent deployment path.
-    "decision": [GPT_56_SOL, OPUS_5, KIMI_K3, GPT_OSS],
-    "triage":   [GPT_OSS, HAIKU_45],
+    # heterogeneous fallbacks; Qwen is the final independent deployment path.
+    "decision": [GPT_56_SOL, OPUS_5, KIMI_K3, QWEN_397B],
+    "triage":   [QWEN_397B, HAIKU_45],
     "critic":   [GPT_54, SONNET_5],
     # Development roles: cheap Nebius models for build-and-test iteration, so
     # dry runs never spend frontier-model budget.
-    "dev_decision": [KIMI_K3, QWEN_397B, GPT_OSS],
-    "dev_triage":   [GPT_OSS, QWEN_397B],
+    "dev_decision": [KIMI_K3, QWEN_397B],
+    "dev_triage":   [QWEN_397B],
 }
 
 

@@ -15,6 +15,7 @@ from typing import Any
 from agent.config import ET, WINDOW_CLOSE
 from agent.host import telemetry
 from agent.host.action_triggers import ActionTriggerStore, entry_condition
+from agent.host import entry_signal
 from agent.host.execution import Executor
 from agent.host.exit_policy import ExitPolicyStore
 from agent.host.rest import Rest
@@ -25,6 +26,9 @@ from agent.host.thesis_store import ThesisStore
 from agent.quant import bs, candidates as cand, measures as ms, score_horizon, vol
 from agent.quant import structures as st
 from agent.types import CONTRACT_MULTIPLIER, Leg, TradeIntent
+
+MAX_EVALUATE_MANY_CANDIDATES = 12
+MAX_UNIQUE_EVALUATIONS_PER_CYCLE = 18
 
 
 class CapabilityError(RuntimeError):
@@ -141,6 +145,7 @@ class Capabilities:
         # Successful, cycle-local evidence.  A tool name alone is not proof: every
         # record is bound to the exact candidate geometry and distribution inputs.
         self._enumerated: set[tuple] = set()
+        self._enumeration_queries: list[dict] = []
         self._measure_context: dict[str, dict] = {}
         self._evaluated: list[dict] = []
         self._ranked: list[dict] = []
@@ -199,6 +204,21 @@ class Capabilities:
         """End safely without submission, discarding any unsubmitted draft."""
         if self._submitted_this_program:
             raise CapabilityError("cannot declare no-trade after submitting an order")
+        missing = self._terminal_push_no_trade_missing()
+        if missing:
+            out = {
+                "status": "needs_evidence",
+                "reason": (
+                    "terminal allocation remains unused; complete the bounded "
+                    "terminal scan before declaring no-trade"),
+                "missing": missing,
+                "next": (
+                    "evaluate a true bullish debit call spread and at least one "
+                    "genuinely different comparator, rank the batch, then trade the "
+                    "best robust candidate or name the measured refusal"),
+            }
+            self._trading_result = dict(out)
+            return out
         discarded = self.ex.latest_staged is not None
         out = self._set_program_decision("no_trade", reason)
         if discarded:
@@ -334,7 +354,17 @@ class Capabilities:
         """Deterministic structure search over the liquidity-gated chain."""
         chain = self._options_tradeable_chain(underlying, exp_gte, exp_lte,
                                               width=width, max_spread_pct=max_spread_pct)
+        queries = getattr(self, "_enumeration_queries", None)
+        if queries is None:
+            self._enumeration_queries = queries = []
+        requested_families = tuple(families) if families else cand.FAMILIES
         if not chain:
+            queries.append({
+                "underlying": str(underlying).upper(),
+                "families": tuple(requested_families),
+                "candidate_count": 0,
+                "bull_call_count": 0,
+            })
             return {"spot": round(self._market_spot(underlying), 2),
                     "generated": 0, "kept": 0, "families": [],
                     "expiry_coverage": {"generated": {}, "kept": {},
@@ -352,6 +382,12 @@ class Capabilities:
             c.detail.update(score_horizon.candidate_horizon(c.expiry, observed_at))
             self._candidates[c.id] = c
             self._enumerated.add(self._candidate_signature(c))
+        queries.append({
+            "underlying": str(underlying).upper(),
+            "families": tuple(requested_families),
+            "candidate_count": len(kept),
+            "bull_call_count": sum(1 for c in kept if self._is_bull_call(c)),
+        })
         shown = _diverse(kept, int(limit))
         return {"spot": round(spot, 2), "generated": len(found), "kept": len(kept),
                 "families": sorted({c.family for c in kept}),
@@ -363,6 +399,64 @@ class Capabilities:
                         "process it inside the program and print only a capped "
                         "summary; rank on edge with vol.evaluate",
                 "candidates": [c.to_json() for c in shown]}
+
+    @staticmethod
+    def _is_bull_call(candidate: cand.Candidate) -> bool:
+        """True only for the canonical long-lower/short-higher debit call spread."""
+        if candidate.family != "vertical_call" or candidate.net_price <= 0:
+            return False
+        call_legs = [leg for leg in candidate.legs if leg.option_type == "call"]
+        if len(call_legs) != 2:
+            return False
+        bought = [leg for leg in call_legs if leg.side == "buy"]
+        sold = [leg for leg in call_legs if leg.side == "sell"]
+        return (len(bought) == len(sold) == 1
+                and bought[0].strike < sold[0].strike)
+
+    def _terminal_push_no_trade_missing(self) -> list[str]:
+        """Host-enforce one bounded opportunity scan before a terminal no-trade.
+
+        This is deliberately cycle-local and only applies to entry-oriented
+        triggers.  Management/news/fill cycles must remain free to end after doing
+        their actual job, and dev's non-terminal sizing posture is untouched.
+        """
+        if getattr(self.ex, "sizing_posture", "balanced") != "terminal_push":
+            return []
+        trigger_name = str(self.trigger.get("name") or "")
+        if trigger_name not in {
+            "active_session_startup", "session_anchor", "restart_rebaseline",
+            "deployment_floor", "portfolio_build_review",
+        }:
+            return []
+
+        missing: list[str] = []
+        queries = getattr(self, "_enumeration_queries", [])
+        vertical_queries = [row for row in queries
+                            if "vertical_call" in row.get("families", ())]
+        if not vertical_queries:
+            missing.append(
+                "options.enumerate(..., families including 'vertical_call')")
+
+        evaluated_ids = {str(row.get("candidate"))
+                         for row in getattr(self, "_evaluated", [])}
+        evaluated_candidates = [self._candidates[candidate_id]
+                                for candidate_id in evaluated_ids
+                                if candidate_id in self._candidates]
+        available_bull_calls = sum(int(row.get("bull_call_count") or 0)
+                                   for row in vertical_queries)
+        if (available_bull_calls > 0
+                and not any(self._is_bull_call(c) for c in evaluated_candidates)):
+            missing.append("vol.evaluate a true bullish debit call spread")
+        if len(evaluated_ids) < 2:
+            missing.append("vol.evaluate at least two genuinely different candidates")
+        elif (available_bull_calls > 0
+              and not any(not self._is_bull_call(c)
+                          for c in evaluated_candidates)):
+            missing.append("vol.evaluate at least one non-bull-call comparator")
+        if not any(int(row.get("candidate_count") or 0) >= 2
+                   for row in getattr(self, "_ranked", [])):
+            missing.append("vol.rank at least two evaluated candidates")
+        return missing
 
     # ---- vol ---------------------------------------------------------------
     def _vol_realized(self, symbol, lookback=60, window=20):
@@ -468,6 +562,15 @@ class Capabilities:
         if measures is None:
             raise CapabilityError(f"unknown measure handle {measure_handle!r}; call "
                                   "vol.measures first")
+        evaluated_ids = {str(row.get("candidate"))
+                         for row in getattr(self, "_evaluated", [])}
+        if (candidate_id not in evaluated_ids
+                and len(evaluated_ids) >= MAX_UNIQUE_EVALUATIONS_PER_CYCLE):
+            raise CapabilityError(
+                "cycle distribution-evaluation budget exhausted; keep the broad "
+                f"shortlist to at most {MAX_EVALUATE_MANY_CANDIDATES} candidates "
+                "and reuse those results for ranking before fully rescoring only "
+                "the finalist")
         traded = c.net_price * 100.0
         context = self._measure_context.get(measure_handle) or {}
         value_at_horizon = self._candidate_value_function(c, context)
@@ -511,6 +614,22 @@ class Capabilities:
         ids = list(dict.fromkeys(str(candidate_id) for candidate_id in candidate_ids))
         if not ids:
             raise CapabilityError("candidate_ids must not be empty")
+        if len(ids) > MAX_EVALUATE_MANY_CANDIDATES:
+            raise CapabilityError(
+                f"vol.evaluate_many accepts at most {MAX_EVALUATE_MANY_CANDIDATES} "
+                "shortlisted candidates per batch; filter options.enumerate output "
+                "by family/expiry/crossing cost before distribution evaluation")
+        evaluated_ids = {str(row.get("candidate"))
+                         for row in getattr(self, "_evaluated", [])}
+        new_ids = set(ids) - evaluated_ids
+        if (len(evaluated_ids) + len(new_ids)
+                > MAX_UNIQUE_EVALUATIONS_PER_CYCLE):
+            remaining = max(
+                MAX_UNIQUE_EVALUATIONS_PER_CYCLE - len(evaluated_ids), 0)
+            raise CapabilityError(
+                "cycle distribution-evaluation budget would be exceeded; "
+                f"only {remaining} new candidate(s) remain. Reuse prior evaluations "
+                "and fully rescore only the finalist.")
         return {candidate_id: self._vol_evaluate(
                     candidate_id, measure_handle,
                     include_iv_sensitivity=bool(include_iv_sensitivity))
@@ -1158,7 +1277,10 @@ class Capabilities:
         return out
 
     def _trading_execute_if(self, intent: dict, max_entry_debit=None,
-                            min_entry_credit=None, valid_for_seconds=30):
+                            min_entry_credit=None, valid_for_seconds=30,
+                            entry_mode="auto", max_adverse_move_em=0.15,
+                            signal_confirmation_samples=2,
+                            signal_sample_interval_seconds=1.0):
         """Two-phase entry whose reviewed price boundary survives decision lag."""
         if self._program_decision is not None:
             raise CapabilityError(
@@ -1172,9 +1294,27 @@ class Capabilities:
             condition = entry_condition(
                 max_entry_debit=max_entry_debit,
                 min_entry_credit=min_entry_credit)
+            evidence = self.entry_evidence(ti)
+            policy = entry_signal.build_policy(
+                evidence, entry_mode=str(entry_mode),
+                max_adverse_move_em=float(max_adverse_move_em),
+                confirmation_samples=int(signal_confirmation_samples),
+                sample_interval_seconds=float(signal_sample_interval_seconds))
+            def revalidate_signal():
+                checked_at = dt.datetime.now(dt.timezone.utc)
+                current_context = self.series.directional_contexts(
+                    {"SPY", "QQQ", "IWM", ti.underlying}, checked_at).get(
+                        ti.underlying.upper())
+                return entry_signal.evaluate(
+                    policy, current_context, self._market_spot(ti.underlying))
+
+            signal_verdict = revalidate_signal()
             out = self.ex.execute(
                 ti, economic_condition=condition,
-                authorization_seconds=float(valid_for_seconds), **(kw or {}))
+                authorization_seconds=float(valid_for_seconds),
+                signal_policy=policy, signal_verdict=signal_verdict,
+                signal_revalidator=revalidate_signal,
+                **(kw or {}))
         except ValueError as exc:
             raise CapabilityError(str(exc)) from exc
         self._trading_result = dict(out)
@@ -1278,7 +1418,11 @@ class Capabilities:
 
     def _trading_set_entry_trigger(self, intent: dict, max_entry_debit=None,
                                    min_entry_credit=None, valid_for_seconds=60,
-                                   max_spot_drift_pct=0.3, reason=""):
+                                   max_spot_drift_pct=0.3, entry_mode="auto",
+                                   max_adverse_move_em=0.15,
+                                   signal_confirmation_samples=2,
+                                   signal_sample_interval_seconds=1.0,
+                                   reason=""):
         """Authorize one exact entry briefly; Tier 0 re-runs all host gates."""
         if self.action_triggers is None:
             raise CapabilityError("action trigger store is unavailable")
@@ -1314,12 +1458,21 @@ class Capabilities:
                     }
                     self._trading_result = dict(out)
                     return out
+            reference_spot = float(self._market_spot(ti.underlying))
+            evidence = self.entry_evidence(ti)
+            signal_policy = entry_signal.build_policy(
+                evidence, entry_mode=str(entry_mode),
+                reference_spot=reference_spot,
+                max_adverse_move_em=float(max_adverse_move_em),
+                confirmation_samples=int(signal_confirmation_samples),
+                sample_interval_seconds=float(signal_sample_interval_seconds))
             row = self.action_triggers.set_entry(
                 ti, condition=condition,
                 valid_for_seconds=float(valid_for_seconds),
-                reference_spot=float(self._market_spot(ti.underlying)),
+                reference_spot=reference_spot,
                 max_spot_drift_pct=float(max_spot_drift_pct),
-                evidence=self.entry_evidence(ti), reason=str(reason))
+                evidence=evidence, signal_policy=signal_policy,
+                reason=str(reason))
         except ValueError as exc:
             raise CapabilityError(str(exc)) from exc
         out = {**row, "trigger_status": row.get("status"),

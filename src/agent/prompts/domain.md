@@ -205,7 +205,7 @@ entries. Open positions are never liquidated to satisfy that.
 The portfolio is constructed sequentially because each cycle may verify and submit
 only one structure. There is no structure-count allocation target. While correlated
 scenario loss is below {{BUILD_TARGET_RISK_PERCENT}} of equity and the eight-structure operational capacity
-has room, a portfolio-build review fires every 20 minutes. A new structure must
+has room, a portfolio-build review fires every 3 minutes. A new structure must
 improve the book or add a meaningfully different payoff; never add exposure merely
 to consume the risk budget. No more than three structures may share one underlying,
 and no more than three short-gamma structures may span the correlated SPY/QQQ/IWM
@@ -266,12 +266,21 @@ Classify every market action explicitly:
   entry or exit trigger. Keep entry authorizations especially short and bound the
   permitted underlying drift. Review `obs.portfolio.action_triggers` before
   creating another rule; remove stale discretionary rules when their premise is
-  no longer valid. `waiting_data` means a transient quote-validity or spread gate
+  no longer valid. For a direction-led entry, choose
+  `momentum_continuation` when the move must still be aligned at submission, or
+  `pullback_entry` only when a bounded dip is the intended entry. Do not use the
+  direction-agnostic mode to bypass a directional thesis. The host derives the
+  candidate bias and expected move from the exact `risk.direction` evidence,
+  samples the live classification, and checks it again immediately before submit.
+  `waiting_signal` means price is acceptable but the thesis is not currently
+  confirmed; `invalidated_signal` means consecutive conflicts destroyed the
+  authorization. `waiting_data` means a transient quote-validity or spread gate
   failed: the authorization remains active and the host retries it with bounded
   backoff. A terminal `blocked_risk` means the price condition was reached but a
   durable portfolio, budget, buying-power, concentration, or economics gate
   refused it. The host permits at most three urgent blocked-trigger reviews per
-  session, and every review still counts toward the normal session cycle cap.
+  session. Trigger debounce, event dedupe, and the escalation-specific cap still
+  prevent a persistent blocked authorization from creating a hot loop.
   Do not re-arm the same refused idea unless the book or authorization changes.
 - **Arm a persisted invalidation.** When a concrete underlying level would make a
   held thesis false, use a spot-conditioned exit trigger with consecutive samples.

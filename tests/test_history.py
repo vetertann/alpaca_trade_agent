@@ -113,10 +113,12 @@ def test_only_broker_backed_theses_enter_the_observation_bundle(tmp_path):
     assert stale.thesis_id not in str(bundle)
 
 
-def test_preflight_uses_the_early_final_session_wind_down():
-    final_afternoon = dt.datetime(2026, 9, 3, 15, 1,
+def test_preflight_uses_the_extended_final_session_wind_down():
+    final_afternoon = dt.datetime(2026, 9, 3, 15, 55,
                                   tzinfo=preflight.ET)
     assert preflight._session_state(final_afternoon) == "WINDING_DOWN"
+    assert preflight._session_state(final_afternoon.replace(
+        hour=15, minute=30)) == "ACTIVE"
 
 
 def test_daily_windows_remain_available_when_intraday_stream_is_warm(tmp_path,

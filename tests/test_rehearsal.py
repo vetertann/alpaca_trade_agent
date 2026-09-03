@@ -113,7 +113,7 @@ def test_full_restart_and_forced_liquidation_rehearsal(tmp_path):
     agent.trace = Trace()
     agent.theses = Theses()
 
-    final_wind_down = dt.datetime(2026, 9, 3, 15, 5, tzinfo=ET)
+    final_wind_down = dt.datetime(2026, 9, 3, 15, 46, tzinfo=ET)
     acted = agent.sweep_exits(now=final_wind_down)
     assert acted and broker.submissions
     submission = broker.submissions[0]

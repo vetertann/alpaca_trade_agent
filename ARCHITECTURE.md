@@ -267,12 +267,15 @@ risk.direction(candidate_id, sigma, days)         # geometry + market alignment
 trading.preview(intent)
 trading.execute(intent)                            # two-phase entry
 trading.execute_if(intent, max_entry_debit=None, min_entry_credit=None,
-                   valid_for_seconds=30)           # fresh-price two-phase entry
+                   valid_for_seconds=30, entry_mode="auto",
+                   max_adverse_move_em=0.15)       # fresh-price + signal entry
 trading.close(structure_id, reason)                # risk-reducing, host priced
 trading.close_if(structure_id, min_executable_profit, reason)
 trading.set_entry_trigger(intent, max_entry_debit=None, min_entry_credit=None,
                           valid_for_seconds=60, max_spot_drift_pct=0.3,
-                          reason="...")
+                          entry_mode="auto", max_adverse_move_em=0.15,
+                          signal_confirmation_samples=2,
+                          signal_sample_interval_seconds=1, reason="...")
 trading.set_exit_trigger(structure_id, min_executable_profit,
                          valid_for_seconds=3600, reason="...")
 trading.remove_trigger(trigger_id, reason)
@@ -596,7 +599,7 @@ Because all four streams are held in one process, everything a decision needs is
 ### Session state machine
 
 ```text
-        09:30                09:45                        15:45          16:00
+        09:30                09:45                        15:55          16:00
   ────────┬────────────────────┬────────────────────────────┬──────────────┬────────
           │      WARM-UP       │          ACTIVE            │ WINDING DOWN │  CLOSED
           │  streams live      │  full loop                 │ exits only   │
@@ -609,7 +612,7 @@ Because all four streams are held in one process, everything a decision needs is
 - **WINDING DOWN** — exits and repairs only, so the book is deliberate rather than accidental at the close.
 - **CLOSED** — reconcile, mark the book, write the daily trace segment. Tier 0 idles.
 
-Thursday September 3 is the last scored session. Its WINDING DOWN begins at 15:00 rather than 15:45. Expiring and metadata-unknown positions flatten; later-dated positions remain subject to profit, loss, thesis and explicit model-directed exits instead of blanket liquidation.
+Thursday September 3 is the last scored session. Its WINDING DOWN begins at 15:55 ET, preserving the final entry window until five minutes before the close. The host rechecks that deadline immediately before every entry submission, so a slow decision cycle cannot cross it. Expiring positions still enter their separate mandatory liquidation protocol at 15:15 unless settlement is authorized; later-dated positions remain subject to profit, loss, thesis and explicit model-directed exits instead of blanket liquidation.
 
 ### Three tiers
 
@@ -632,7 +635,16 @@ never turns into a market-chasing order.
 
 The model can instead arm a durable one-shot action trigger. Entry triggers bind
 the complete canonical intent and its evidence for at most 120 seconds, cap
-underlying drift, and re-run every admission gate when they fire. Exit triggers
+underlying drift, and re-run every admission gate when they fire. Their canonical
+hash also binds a host-derived signal policy: the model may choose continuation,
+bounded pullback, or direction-agnostic entry semantics, while candidate bias,
+expected move, and the analysis-time label come only from the exact recorded
+`risk.direction` result. Tier 0 recomputes the current directional context when
+the price condition is met and again immediately before durable submission. A
+neutral continuation is `waiting_signal`; consecutive opposite/adverse samples
+terminate as `invalidated_signal`, while one noisy sample cannot cancel the
+authorization. Volatility-led neutral structures default to direction-agnostic
+handling. Exit triggers
 bind an exact reconciled structure and conservative executable P&L. Tier 0 checks
 only while a trigger is active, once per second, and uses a deterministic broker
 ID so restart recovery cannot duplicate the action. Active conditions and recent
@@ -734,7 +746,7 @@ schema or install a new capability for future cycles.
 |---|---|---|
 | **Active-session startup** | Service starts or restarts while entries are allowed | once per process start |
 | **Session anchors** | 09:45 · 11:00 · 14:00 · 15:30 ET | 4 per session |
-| **Portfolio-build review** | Correlated scenario loss below the runtime build target, operational capacity available, and no decision cycle for 20 minutes | as needed while qualified marginal opportunities remain |
+| **Portfolio-build review** | Correlated scenario loss below the runtime build target, operational capacity available, and no decision cycle for 3 minutes | as needed while qualified marginal opportunities remain |
 | **Underlying move** | Spot moves more than 0.5× the ATM-IV-implied daily move since the last cycle | 1–2 per session |
 | **Volatility shift** | `iv_rv_ratio` moves more than 10% relative since the last cycle | under 1 per session |
 | **Portfolio deterioration** | Equity or one structure deteriorates materially from the last decision baseline | as needed |
@@ -888,7 +900,7 @@ The preamble is a versioned artifact with its own hash, recorded in the trace al
 ### Cycle contract
 
 - **Serialized.** One cycle runs at a time. Triggers that fire during a cycle are coalesced and evaluated once it completes, so a volatile tape produces one considered decision rather than overlapping ones. Tier 0 continues throughout, so exits still fire while the model is thinking.
-- **Bounded.** A cycle has a wall-clock budget of 90 seconds and at most three analysis rounds. Exceeding either abandons the cycle, which is logged as a failure and leaves the book untouched.
+- **Bounded.** Each generated program has a 180-second wall-clock budget and a cycle has at most three analysis rounds. Exceeding either abandons the current program or cycle, is logged, and leaves any unsubmitted draft untouched. Deterministic Tier-0 exit enforcement runs independently, so a slow analysis program cannot suspend stops or deadlines.
 - **Closed outcome set.** Every cycle terminates in exactly one of `EXECUTED`, `PROPOSED`, `NO_TRADE`, `BLOCKED_RISK`, `BLOCKED_LIQUIDITY`, `DEGRADED`, `ERROR`. The host validates the outcome against what actually happened and refuses `EXECUTED` when no order was acknowledged. `PROPOSED` is the dry-run terminal result; declining to trade is a first-class recorded result rather than something indistinguishable from a crash.
 - **Explicit intents.** An executing cycle returns intents of `open`, `close`, or `adjust`, each carrying a thesis and its exit conditions.
 - **In-window by default.** Candidate enumeration runs over the 132 streamed contracts, which are already the near-the-money short-dated structures the strategy wants. Reaching outside costs either a window re-centre or a REST burst, and the program states which it is doing.
@@ -952,6 +964,32 @@ qualified candidates, rank stability and the median selection score use expected
 profit divided by maximum loss and by `max(DTE, 1)`. This prevents a large credit or
 raw dollar payoff from winning merely because it consumes more loss capital, while
 preserving the per-distribution sign test as the evidence threshold.
+
+### Terminal scoring posture
+
+The deployed scoring profile is intentionally loss-seeking relative to the balanced
+default, but its aggression is host-owned rather than rhetorical. Every robust
+finalist targets maximum loss equal to 20% of current equity plus twice the durable
+realised loss, capped by the configured 25% evidence and single-position ceilings.
+If host headroom can support the target, a request below 85% is returned as
+`reconsider_sizing`. Realised loss is used instead of unrealised P&L so quote noise
+cannot resize a proposed order from tick to tick.
+
+On the judged terminal profile, correlated-scenario loss, aggregate premium at risk,
+and the periodic build target are set to 100% of equity. At that value they are
+observational account boundaries rather than tournament sizing ceilings: repeated
+qualified entries are not cut merely because earlier positions already consume a
+portfolio-level percentage. Broker buying power and the 25% per-position ceiling
+remain hard constraints.
+
+An entry-oriented cycle also cannot terminate with `NO_TRADE` before a bounded scan
+has attempted vertical calls, evaluated a canonical debit bull-call spread when one
+is liquid, evaluated a genuinely different comparator, and ranked at least two
+candidates. This distinguishes a real bullish spread from a positive-delta straddle.
+The policy does not bypass exact-candidate evidence, fresh-price edge, directional
+alignment, liquidity, concentration or buying-power gates. Scenario and
+premium-at-risk accounting still run and remain visible, but their prod limits are
+account-sized rather than marginal deployment targets.
 
 ---
 
@@ -1370,7 +1408,7 @@ helper is a no-op when disabled, so telemetry can never break trading.
 
 ## 15. Build status
 
-Implemented and verified. **485 tests.**
+Implemented and verified. **510 tests.**
 
 | Component | Module | State |
 |---|---|---|
@@ -1403,7 +1441,7 @@ Implemented and verified. **485 tests.**
 | Warm-up, fill-denomination and recovery protocols | `scripts/warmup_check.py`, `scripts/fill_probe.py`, `scripts/recovery_probe.py` | done — live fill quantity resolved as spreads |
 | Spread, volatility and portfolio-risk calibration | `scripts/calibrate.py`, `scripts/portfolio_risk_replay.py` | done |
 | Token and cost estimator | `scripts/estimate_cost.py` | done |
-| VPS deployment | `deploy/` | done — competition agent plus read-only panel on 3001 |
+| VPS deployment | `deploy/` | done — competition agent plus read-only panel on 7001 |
 
 ### Not built, deliberately
 
@@ -1568,12 +1606,12 @@ read-only paper-demo panel is a separate systemd service.
 
 | Role | Unit and directory | Configuration | Panel |
 |---|---|---|---|
-| judged competition account | `alpaca-agent.service`, `/opt/alpaca-agent` | competition, execute, 4% robust/scenario ceiling | `alpaca-panel.service`, TCP 3001 |
+| judged competition account | `alpaca-agent.service`, `/opt/alpaca-agent` | competition, execute, 25% per-position terminal target; account-sized aggregate bounds | `alpaca-panel.service`, TCP 7001 |
 
 The services use the dedicated `alpaca` system user with `nologin`. Confinement includes
 `ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges`, `PrivateTmp`, a 1 GB agent
 memory cap, and a restart limit of five in ten minutes. The panel has a 256 MB cap and
-reads artifacts only. UFW exposes 3001 for the hackathon paper demo; a non-demo
+reads artifacts only. UFW exposes 7001 for the hackathon paper demo; a non-demo
 deployment should bind loopback and use an authenticated proxy or SSH tunnel.
 
 Co-tenants `xray` (443), `mtproxy` (1443), and the existing `control.service` (3000)

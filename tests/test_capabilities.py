@@ -2,7 +2,7 @@
 import pytest
 import datetime as dt
 from types import SimpleNamespace
-from agent.host.capabilities import _diverse
+from agent.host.capabilities import MAX_EVALUATE_MANY_CANDIDATES, _diverse
 from agent.host.capabilities import Capabilities, CapabilityError
 from agent.host.action_triggers import ActionTriggerStore
 from agent.host.exit_policy import ExitPolicyStore
@@ -97,6 +97,20 @@ def test_evaluate_many_batches_and_deduplicates_candidate_ids():
 
     assert list(out) == ["a", "b"]
     assert seen == [("a", "m1"), ("b", "m1")]
+
+
+def test_evaluate_many_refuses_an_unbounded_monte_carlo_batch_before_work():
+    caps = object.__new__(Capabilities)
+    seen = []
+    caps._evaluated = []
+    caps._vol_evaluate = lambda *args, **kwargs: seen.append(args)
+
+    with pytest.raises(CapabilityError, match="at most 12 shortlisted"):
+        caps._vol_evaluate_many(
+            [f"candidate-{i}" for i in range(MAX_EVALUATE_MANY_CANDIDATES + 1)],
+            "m1")
+
+    assert seen == []
 
 
 def test_rank_reuses_batch_capital_scores_without_repricing_every_candidate():
@@ -312,6 +326,50 @@ def test_invalid_no_trade_reason_does_not_discard_the_draft():
     with pytest.raises(CapabilityError, match="reason must be non-empty"):
         caps._decision_no_trade("  ")
     assert caps.ex.latest_staged is staged and not caps.ex.discarded
+
+
+def test_terminal_push_no_trade_requires_bounded_scan_on_build_trigger():
+    caps = control_caps()
+    caps.ex.sizing_posture = "terminal_push"
+    caps.trigger = {"name": "active_session_startup"}
+    caps._enumeration_queries = []
+    caps._evaluated = []
+    caps._ranked = []
+    caps._candidates = {}
+
+    out = caps._decision_no_trade("nothing obvious")
+
+    assert out["status"] == "needs_evidence"
+    assert any("options.enumerate" in item for item in out["missing"])
+    assert caps.program_decision is None
+
+
+def test_terminal_push_no_trade_accepts_bull_call_and_comparator_scan():
+    caps = control_caps()
+    caps.ex.sizing_posture = "terminal_push"
+    caps.trigger = {"name": "session_anchor"}
+    expiry = dt.date(2026, 9, 11)
+    bull = cd.Candidate(
+        "bull", "vertical_call", "QQQ", expiry.isoformat(),
+        [Leg("LOW", 1, "buy", "buy_to_open", 710, "call", expiry),
+         Leg("HIGH", 1, "sell", "sell_to_open", 715, "call", expiry)],
+        2.0, 200.0, 300.0, 500.0, 1.0)
+    other = cd.Candidate(
+        "other", "straddle", "QQQ", expiry.isoformat(),
+        [Leg("CALL", 1, "buy", "buy_to_open", 712, "call", expiry),
+         Leg("PUT", 1, "buy", "buy_to_open", 712, "put", expiry)],
+        8.0, 800.0, float("inf"), 0.0, 1.0)
+    caps._candidates = {bull.id: bull, other.id: other}
+    caps._enumeration_queries = [{
+        "underlying": "QQQ", "families": ("vertical_call", "straddle"),
+        "candidate_count": 2, "bull_call_count": 1}]
+    caps._evaluated = [{"candidate": "bull"}, {"candidate": "other"}]
+    caps._ranked = [{"candidate_count": 2}]
+
+    out = caps._decision_no_trade("neither clears fresh friction")
+
+    assert out["status"] == "no_trade"
+    assert caps.program_decision["status"] == "no_trade"
 
 
 def test_trade_cannot_follow_a_terminal_program_decision():

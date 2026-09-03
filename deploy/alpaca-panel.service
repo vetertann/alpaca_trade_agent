@@ -14,7 +14,7 @@ WorkingDirectory=/opt/alpaca-agent
 Environment=PYTHONPATH=/opt/alpaca-agent/src
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/alpaca-agent/.venv/bin/python /opt/alpaca-agent/scripts/panel.py \
-    --run-dir /opt/alpaca-agent/.run --host 0.0.0.0 --port 3001
+    --run-dir /opt/alpaca-agent/.run --host 0.0.0.0 --port 7001
 
 Restart=always
 RestartSec=15

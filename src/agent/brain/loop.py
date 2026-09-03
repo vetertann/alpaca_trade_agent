@@ -9,20 +9,20 @@ import datetime as dt
 import math
 from dataclasses import dataclass, field
 
-from agent.config import ET, WINDOW_CLOSE, in_scored_window
+from agent.config import (ENTRY_CUTOFF_ET, ENTRY_OPEN_ET, FINAL_ENTRY_CUTOFF_ET,
+                          ET, WINDOW_CLOSE, entry_cutoff_et, in_scored_window)
 
 WARM_UP_MINUTES = 15          # spreads are widest into the opening auction
-WIND_DOWN_ET = dt.time(15, 45)
+WIND_DOWN_ET = ENTRY_CUTOFF_ET
 EXPIRY_LIQUIDATION_ET = dt.time(15, 15)
-FINAL_SESSION_WIND_DOWN_ET = dt.time(15, 0)
-DEBOUNCE_SECONDS = 300
-FLAT_REVIEW_SECONDS = 1200
+FINAL_SESSION_WIND_DOWN_ET = FINAL_ENTRY_CUTOFF_ET
+DEBOUNCE_SECONDS = 180
+BUILD_REVIEW_SECONDS = 180
 # Eight is the operational hard capacity, not a portfolio target.  Routine build
 # reviews continue until the scenario-risk budget is substantially used; the
 # model is still free to decline every candidate.
 INITIAL_ALLOCATION_CAPACITY = 8
 INITIAL_ALLOCATION_TARGET_RISK_PCT = 0.035
-MAX_CYCLES_PER_SESSION = 24
 DEPLOYMENT_FLOOR_ET = dt.time(10, 30)
 SHORT_PREMIUM_MAX_LOSS_STOP_FRACTION = 0.50
 PORTFOLIO_EQUITY_REVIEW_PCT = 0.0015
@@ -39,10 +39,9 @@ def session_state(now_et: dt.datetime, trading_day: bool = True) -> str:
     t = now_et.time()
     if t < dt.time(9, 30) or t >= dt.time(16, 0):
         return "CLOSED"
-    if t < dt.time(9, 45):
+    if t < ENTRY_OPEN_ET:
         return "WARM_UP"
-    wind = (FINAL_SESSION_WIND_DOWN_ET if now_et.date() == WINDOW_CLOSE.date()
-            else WIND_DOWN_ET)
+    wind = entry_cutoff_et(now_et.date())
     if t >= wind:
         return "WINDING_DOWN"
     return "ACTIVE"
@@ -115,8 +114,6 @@ class TriggerState:
         if session_state(now_et, trading_day) == "CLOSED":
             return None
         expected_daily_move = expected_daily_move or {}
-        cycle_budget_available = (
-            self.cycles_this_session < MAX_CYCLES_PER_SESSION)
 
         # Resulting-book risk is already outside its calibrated envelope. The
         # first crossing bypasses the ordinary event debounce; the latch clears
@@ -131,19 +128,17 @@ class TriggerState:
                 self.scenario_breach_latched = False
             if breached and not self.scenario_breach_latched:
                 self.scenario_breach_latched = True
-                if cycle_budget_available:
-                    return Trigger(
-                        "portfolio_scenario_breach",
-                        f"correlated scenario loss ${loss:,.0f} exceeds the "
-                        f"${float(scenario.get('limit_dollars') or 0):,.0f} limit; "
-                        "new risk is restricted to mathematically repairing structures",
-                        round(loss, 2), exempt_from_debounce=True)
+                return Trigger(
+                    "portfolio_scenario_breach",
+                    f"correlated scenario loss ${loss:,.0f} exceeds the "
+                    f"${float(scenario.get('limit_dollars') or 0):,.0f} limit; "
+                    "new risk is restricted to mathematically repairing structures",
+                    round(loss, 2), exempt_from_debounce=True)
 
         # --- exempt triggers first: these bypass debounce -------------------
         if (not self.deployment_floor_fired and not book
                 and now_et.time() >= DEPLOYMENT_FLOOR_ET
-                and now_et.date() == WINDOW_CLOSE.date() - dt.timedelta(days=3)
-                and cycle_budget_available):
+                and now_et.date() == WINDOW_CLOSE.date() - dt.timedelta(days=3)):
             return Trigger("deployment_floor",
                            "no position open by 10:30 ET on the first session",
                            exempt_from_debounce=True)
@@ -163,7 +158,7 @@ class TriggerState:
             if (progress is not None and float(progress) >= STOP_REVIEW_PROGRESS
                     and (old_progress is None
                          or float(old_progress) < STOP_REVIEW_PROGRESS)
-                    and cycle_budget_available):
+                    ):
                 return Trigger(
                     "stop_approach",
                     f"{sid} reached {float(progress):.0%} of its deterministic loss stop",
@@ -172,13 +167,10 @@ class TriggerState:
         # --- scheduled anchors ----------------------------------------------
         for anchor in ANCHORS:
             if now_et.time() >= anchor and (self.last_anchor_fired is None
-                                            or self.last_anchor_fired < anchor) \
-                    and cycle_budget_available:
+                                            or self.last_anchor_fired < anchor):
                 return Trigger("session_anchor", f"{anchor:%H:%M} ET anchor")
 
         if self._debounced(now_et):
-            return None
-        if not cycle_budget_available:
             return None
 
         # Portfolio predicates compare continuously sampled marks with the last
@@ -249,12 +241,12 @@ class TriggerState:
             count < INITIAL_ALLOCATION_CAPACITY
             and portfolio_risk_pct < allocation_target_risk_pct)
         if (allocation_needed and self.last_cycle_at is not None
-                and (now_et - self.last_cycle_at).total_seconds() >= FLAT_REVIEW_SECONDS):
+                and (now_et - self.last_cycle_at).total_seconds() >= BUILD_REVIEW_SECONDS):
             return Trigger(
                 "portfolio_build_review",
                 f"portfolio scenario risk remains below "
                 f"{allocation_target_risk_pct:.1%} with capacity available "
-                "and has not been reviewed for 20 minutes")
+                "and has not been reviewed for 3 minutes")
         return None
 
     def _debounced(self, now_et: dt.datetime) -> bool:

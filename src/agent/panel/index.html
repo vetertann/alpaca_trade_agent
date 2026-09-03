@@ -266,20 +266,28 @@ function actionTriggers(rows) {
       const label = r.purpose === "exit"
         ? `close ${esc((r.structure_id||"").slice(0,8))}`
         : `enter ${esc(((r.intent_summary||{}).underlying)||"")} ${esc(((r.intent_summary||{}).family)||"")}`;
-      const cond = c.kind === "max_entry_debit" ? `debit ≤ ${c.value}`
+      let cond = c.kind === "max_entry_debit" ? `debit ≤ ${c.value}`
         : c.kind === "min_entry_credit" ? `credit ≥ ${c.value}`
+        : c.kind === "spot_above" ? `spot ≥ ${c.value}`
+        : c.kind === "spot_below" ? `spot ≤ ${c.value}`
         : `sell-now P&L ≥ ${money(c.value||0)}`;
+      const signal = r.signal_policy || {};
+      if (r.purpose === "entry" && signal.mode) {
+        cond += ` · ${String(signal.mode).replaceAll("_", " ")}`;
+      }
       const last = r.last_observed_value == null ? "—"
         : (c.kind === "min_executable_profit" ? money(r.last_observed_value) : Number(r.last_observed_value).toFixed(2));
       const state = r.status === "active"
         ? (r.last_evaluation_status || "armed") : r.status;
       const detail = r.last_gate_failures && r.last_gate_failures.length
         ? ` · ${r.last_gate_failures.join(", ")}` : "";
+      const signalNow = (r.last_signal_verdict||{}).current_classification;
+      const signalDetail = signalNow ? ` · now ${signalNow}` : "";
       const escalation = r.status === "blocked_risk"
         ? (r.escalation_queued ? " · review queued" : " · review visible") : "";
       const expiry = r.status === "active" ? `${Math.ceil(r.seconds_remaining||0)}s` : "done";
       return `<tr><td>${label}</td><td class="dim">${cond}</td>`
-        + `<td class="${r.status==='blocked_risk'?'down':'dim'}">${esc(state)}${esc(detail)}${esc(escalation)}</td>`
+        + `<td class="${['blocked_risk','invalidated_signal'].includes(r.status)?'down':'dim'}">${esc(state)}${esc(signalDetail)}${esc(detail)}${esc(escalation)}</td>`
         + `<td class="n">${last}</td><td class="n dim">${expiry}</td></tr>`;
     }).join("");
 }

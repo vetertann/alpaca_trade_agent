@@ -4,7 +4,7 @@ from collections import deque
 import pytest
 
 from agent.brain import preflight
-from agent.brain.loop import MAX_CYCLES_PER_SESSION, Trigger, TriggerState
+from agent.brain.loop import Trigger, TriggerState
 from agent.config import ET
 from agent.run import Agent, _eligible_expiries
 from agent.host.action_triggers import ActionTriggerStore
@@ -150,18 +150,15 @@ def test_blocked_trigger_escalations_are_capped_at_three_per_session(tmp_path):
     assert len(value._pending_triggers) == 3
 
 
-def test_exempt_event_still_obeys_overall_session_cycle_cap():
+def test_exempt_event_is_not_blocked_by_historical_cycle_count():
     value = agent()
-    value.triggers.cycles_this_session = MAX_CYCLES_PER_SESSION
+    value.triggers.cycles_this_session = 999
     value._queue_trigger(
         Trigger("action_trigger_blocked", "risk review",
                 exempt_from_debounce=True), key="blocked:1")
 
-    assert value._pop_event_trigger(now()) is None
-    assert value.trace.notes[-1] == (
-        "trigger_suppressed",
-        {"trigger": "action_trigger_blocked",
-         "reason": "session cycle cap reached"})
+    trigger = value._pop_event_trigger(now())
+    assert trigger and trigger.name == "action_trigger_blocked"
 
 
 def test_action_trigger_price_miss_remains_active_and_labelled(tmp_path):
@@ -245,6 +242,53 @@ def test_fired_entry_trigger_binds_broker_order_to_thesis(tmp_path):
         trigger, "entry", {"status": "submitted", "order_id": "order-1"}, clock)
 
     assert value.theses.get(thesis.thesis_id).order_ids == ["order-1"]
+
+
+def test_entry_signal_needs_persistent_conflict_before_terminal_invalidation(
+        tmp_path):
+    value = agent()
+    value.action_triggers = ActionTriggerStore(tmp_path / "action_triggers.jsonl")
+
+    class Series:
+        label = "bearish"
+
+        def directional_contexts(self, symbols, _now=None):
+            return {str(symbol).upper(): {"classification": self.label}
+                    for symbol in symbols}
+
+    value.series = Series()
+    clock = dt.datetime.now(dt.timezone.utc)
+    policy = {
+        "schema_version": 1, "mode": "momentum_continuation",
+        "candidate_bias": "bullish", "reference_spot": 100.0,
+        "expected_move": 2.0, "max_adverse_move_em": 0.15,
+        "confirmation_samples": 2, "sample_interval_seconds": 1.0,
+    }
+    raw = value.action_triggers._append(
+        "ACTION_TRIGGER", trigger_id="signal-entry", purpose="entry",
+        intent={"underlying": "SPY", "thesis_id": "thesis"},
+        condition={"kind": "max_entry_debit", "value": 2.0},
+        signal_policy=policy, signal_conflict_hits=0,
+        reference_spot=100.0, max_spot_drift_pct=0.3,
+        reason="momentum entry",
+        expires_at=(clock + dt.timedelta(seconds=60)).isoformat())
+    trigger = value.action_triggers.current()[raw["trigger_id"]]
+
+    passed, first = value._sample_entry_signal(trigger, 99.9, clock)
+    assert not passed and first["status"] == "conflicted"
+    current = value.action_triggers.current()[raw["trigger_id"]]
+    assert current["status"] == "active"
+    assert current["signal_conflict_hits"] == 1
+    assert current["last_evaluation_status"] == "waiting_signal"
+
+    passed, second = value._sample_entry_signal(
+        current, 99.8, clock + dt.timedelta(seconds=1))
+    assert not passed and second["status"] == "conflicted"
+    current = value.action_triggers.current()[raw["trigger_id"]]
+    assert current["status"] == "invalidated_signal"
+    assert current["signal_conflict_hits"] == 2
+    assert value.action_triggers.active(clock + dt.timedelta(seconds=1)) == []
+    assert value.trace.notes[-1][0] == "action_trigger_signal_invalidated"
 
 
 def test_startup_waits_until_active():

@@ -8,6 +8,13 @@ def test_glm_is_excluded_from_every_chain():
     assert not any("GLM" in m for m in named)
 
 
+def test_gpt_oss_120b_is_excluded_and_qwen_is_the_nebius_fallback():
+    named = {s.model for chain in models.CHAINS.values() for s in chain}
+    assert "openai/gpt-oss-120b" not in named
+    assert models.CHAINS["decision"][-1].model == "Qwen/Qwen3.5-397B-A17B"
+    assert models.CHAINS["triage"][0].model == "Qwen/Qwen3.5-397B-A17B"
+
+
 def test_dev_chains_are_cheap_nebius_models():
     assert all(s.provider == "nebius" for s in models.CHAINS["dev_decision"])
 

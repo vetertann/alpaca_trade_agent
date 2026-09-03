@@ -19,7 +19,8 @@ from pathlib import Path
 from agent.types import Leg, TradeIntent
 
 ACTIVE = {"active", "firing"}
-TERMINAL = {"fired", "cancelled", "expired", "failed", "blocked_risk"}
+TERMINAL = {"fired", "cancelled", "expired", "failed", "blocked_risk",
+            "invalidated_signal"}
 MAX_ACTIVE = 4
 MIN_ENTRY_TTL_SECONDS = 5
 MAX_ENTRY_TTL_SECONDS = 120
@@ -171,7 +172,8 @@ class ActionTriggerStore:
 
     def set_entry(self, intent: TradeIntent, *, condition: dict,
                   valid_for_seconds: float, reference_spot: float,
-                  max_spot_drift_pct: float, evidence: dict, reason: str,
+                  max_spot_drift_pct: float, evidence: dict, signal_policy: dict,
+                  reason: str,
                   now: dt.datetime | None = None) -> dict:
         now = now or dt.datetime.now(dt.timezone.utc)
         ttl = float(valid_for_seconds)
@@ -187,7 +189,8 @@ class ActionTriggerStore:
             raise ValueError("max_spot_drift_pct must be in (0, 1.0]")
         raw_intent = intent_to_dict(intent)
         action_hash = hashlib.sha256(json.dumps(
-            {"intent": raw_intent, "condition": condition}, sort_keys=True,
+            {"intent": raw_intent, "condition": condition,
+             "signal_policy": signal_policy}, sort_keys=True,
             separators=(",", ":")).encode()).hexdigest()[:24]
         with self._lock:
             self.expire_due(now)
@@ -200,7 +203,9 @@ class ActionTriggerStore:
             self._append(
                 "ACTION_TRIGGER", trigger_id=trigger_id, purpose="entry",
                 action_hash=action_hash, intent=raw_intent, condition=condition,
-                evidence=evidence, reference_spot=round(float(reference_spot), 6),
+                evidence=evidence, signal_policy=signal_policy,
+                signal_conflict_hits=0,
+                reference_spot=round(float(reference_spot), 6),
                 max_spot_drift_pct=drift, reason=reason,
                 expires_at=(now + dt.timedelta(seconds=ttl)).isoformat())
             return self._view(self.current()[trigger_id], now)
@@ -291,6 +296,8 @@ class ActionTriggerStore:
         keep = {key: row.get(key) for key in (
             "trigger_id", "purpose", "structure_id", "action_hash", "condition",
             "reason", "expires_at", "status", "reference_spot", "max_spot_drift_pct",
+            "signal_policy", "signal_conflict_hits", "last_signal_sample_at",
+            "last_signal_verdict",
             "underlying", "confirmation_samples", "sample_interval_seconds",
             "consecutive_hits", "last_sample_at",
             "last_observed_value", "last_observed_at", "last_evaluation_status",

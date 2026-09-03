@@ -18,6 +18,7 @@ import time
 import uuid
 from decimal import Decimal, InvalidOperation
 
+from agent.config import entry_submission_allowed
 from agent.host import gates, portfolio_risk
 from agent.host.contracts import resolve_intent
 from agent.host.ledger import ExecutionLedger, TERMINAL_STATUSES
@@ -38,12 +39,14 @@ class StagedOrder:
     def __init__(self, verified: VerifiedTradeIntent, results: list[GateResult],
                  staged_program_id: int | None = None, sizing: dict | None = None,
                  economic_condition: dict | None = None,
-                 authorization_deadline: dt.datetime | None = None):
+                 authorization_deadline: dt.datetime | None = None,
+                 signal_policy: dict | None = None):
         self.verified = verified
         self.results = results
         self.sizing = sizing or {}
         self.economic_condition = dict(economic_condition or {}) or None
         self.authorization_deadline = authorization_deadline
+        self.signal_policy = dict(signal_policy or {}) or None
         # Confirmation is a deliberation boundary, not merely a second function
         # call.  The host records which model program created the draft so two
         # execute() calls in one generated program can never submit it.
@@ -87,6 +90,16 @@ class StagedOrder:
         kwargs = {kind: float(self.economic_condition["value"])}
         if seconds is not None:
             kwargs["valid_for_seconds"] = int(seconds) if seconds.is_integer() else seconds
+        if self.signal_policy:
+            kwargs.update({
+                "entry_mode": self.signal_policy.get("requested_mode") or
+                              self.signal_policy.get("mode"),
+                "max_adverse_move_em": self.signal_policy.get("max_adverse_move_em"),
+                "signal_confirmation_samples": self.signal_policy.get(
+                    "confirmation_samples"),
+                "signal_sample_interval_seconds": self.signal_policy.get(
+                    "sample_interval_seconds"),
+            })
         return {
             "namespace": "trading", "function": "execute_if",
             "intent": "identical canonical_staged_order",
@@ -256,7 +269,7 @@ class Executor:
                  mode: str = "propose", ledger: ExecutionLedger | None = None,
                  expected_account_id: str | None = None,
                  enforce_entry_risk: bool = False,
-                 sizing_posture: str = "balanced"):
+                 sizing_posture: str = "balanced", submission_clock=None):
         self.rest = rest
         self.params = params
         self.profile_name = profile_name
@@ -278,6 +291,15 @@ class Executor:
         # path accidentally.
         self.enforce_entry_risk = bool(enforce_entry_risk)
         self.sizing_posture = str(sizing_posture)
+        # Production injects a live clock so the final check is sampled at the
+        # broker boundary, not inherited from the start of a slow model cycle.
+        # Tests and offline probes may continue to use their explicit `now`.
+        self.submission_clock = submission_clock
+
+    def _submission_now(self, fallback: dt.datetime | None = None) -> dt.datetime:
+        if callable(self.submission_clock):
+            return self.submission_clock()
+        return fallback or dt.datetime.now(dt.timezone.utc)
 
     def _terminal_push_used(self) -> bool:
         """Return whether the durable one-shot terminal allocation was spent."""
@@ -327,6 +349,7 @@ class Executor:
                     quantity_ceiling: int | None = None,
                     economic_condition: dict | None = None,
                     authorization_deadline: dt.datetime | None = None,
+                    signal_policy: dict | None = None,
                     now: dt.datetime | None = None, store: bool = True) -> StagedOrder:
         intent = resolve_intent(self.rest, intent)
         open_positions = open_positions or []
@@ -541,9 +564,11 @@ class Executor:
         staged = StagedOrder(
             verified, results, self.program_id, sizing=sizing,
             economic_condition=economic_condition,
-            authorization_deadline=authorization_deadline)
+            authorization_deadline=authorization_deadline,
+            signal_policy=signal_policy)
         if store:
-            self._staged[self._stage_key(intent, economic_condition)] = staged
+            self._staged[self._stage_key(
+                intent, economic_condition, signal_policy)] = staged
         return staged
 
     def _size(self, intent: TradeIntent, net_price: float, equity: float, *,
@@ -603,12 +628,14 @@ class Executor:
 
     @classmethod
     def _stage_key(cls, intent: TradeIntent,
-                   economic_condition: dict | None = None) -> str:
-        if not economic_condition:
+                   economic_condition: dict | None = None,
+                   signal_policy: dict | None = None) -> str:
+        if not economic_condition and not signal_policy:
             return cls._key(intent)
         canonical = {
             "intent": cls._key(intent),
             "economic_condition": economic_condition or None,
+            "signal_policy": signal_policy or None,
         }
         blob = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()[:24]
@@ -741,7 +768,8 @@ class Executor:
                     "reason": "submission response was ambiguous; reconciliation pending"}
         return self._bind_prepared(prepared, order, strict=False)
 
-    def retry_not_found(self, client_order_id: str) -> dict:
+    def retry_not_found(self, client_order_id: str, *,
+                        now: dt.datetime | None = None) -> dict:
         """Retry one confirmed-absent request with the exact same ID and body."""
         if self.ledger is None:
             raise RuntimeError("durable retry requires a ledger")
@@ -752,6 +780,11 @@ class Executor:
         if resubmits >= 1:
             return {"status": "not_found", "client_order_id": client_order_id,
                     "reason": "exact retry already attempted"}
+        if str(prepared.get("purpose") or "") == "entry":
+            allowed, reason = entry_submission_allowed(self._submission_now(now))
+            if not allowed:
+                return {"status": "entry_window_closed",
+                        "client_order_id": client_order_id, "reason": reason}
         self.ledger.record_execution_state(
             client_order_id, "pre_submit", resubmits=resubmits + 1,
             lookup_attempts=0, consecutive_404=0)
@@ -793,7 +826,7 @@ class Executor:
                         created = dt.datetime.fromisoformat(str(prepared["created_at"]))
                         if ((now - created).total_seconds() <= EXACT_RETRY_MAX_AGE_SECONDS
                                 and int(prepared.get("resubmits") or 0) < 1):
-                            result = self.retry_not_found(coid)
+                            result = self.retry_not_found(coid, now=now)
                     out.append(result)
                 else:
                     self.ledger.mark_lookup_error(coid, str(exc), now=now)
@@ -828,6 +861,9 @@ class Executor:
 
     def execute(self, intent: TradeIntent, *, economic_condition: dict | None = None,
                 authorization_seconds: float | None = None,
+                signal_policy: dict | None = None,
+                signal_verdict: dict | None = None,
+                signal_revalidator=None,
                 **materialise_kwargs) -> dict:
         """Stage first; confirm only from a later model program in this cycle.
 
@@ -838,7 +874,8 @@ class Executor:
         """
         canonical = resolve_intent(self.rest, intent)
         condition = dict(economic_condition or {}) or None
-        key = self._stage_key(canonical, condition)
+        policy = dict(signal_policy or {}) or None
+        key = self._stage_key(canonical, condition, policy)
         if key not in self._staged:
             seconds = float(authorization_seconds or 30.0) if condition else None
             if condition and not 5 <= seconds <= 120:
@@ -849,7 +886,8 @@ class Executor:
             self._staged.clear()  # one draft per cycle; a changed intent replaces it
             staged = self.materialise(
                 canonical, economic_condition=condition,
-                authorization_deadline=deadline, **materialise_kwargs)
+                authorization_deadline=deadline, signal_policy=policy,
+                **materialise_kwargs)
             reconsider = staged.sizing.get("reconsider_sizing")
             if staged.passed and reconsider:
                 self._staged.pop(key, None)
@@ -907,18 +945,24 @@ class Executor:
         return self.confirm(
             canonical, economic_condition=condition,
             authorization_deadline=staged.authorization_deadline,
+            signal_policy=policy, signal_verdict=signal_verdict,
+            signal_revalidator=signal_revalidator,
             **materialise_kwargs)
 
     # ---- confirmation ------------------------------------------------------
     def confirm(self, intent: TradeIntent, *, now: dt.datetime | None = None,
                 economic_condition: dict | None = None,
                 authorization_deadline: dt.datetime | None = None,
+                signal_policy: dict | None = None,
+                signal_verdict: dict | None = None,
+                signal_revalidator=None,
                 **materialise_kwargs) -> dict:
         """Second call with an identical intent, rechecked against fresh state."""
         now = now or dt.datetime.now(dt.timezone.utc)
         intent = resolve_intent(self.rest, intent)
         condition = dict(economic_condition or {}) or None
-        key = self._stage_key(intent, condition)
+        policy = dict(signal_policy or {}) or None
+        key = self._stage_key(intent, condition, policy)
         intent_key = self._key(intent)
         if intent_key in self._terminal_intents:
             raise PermissionError("this intent was already executed")
@@ -954,6 +998,7 @@ class Executor:
             economic_condition=condition,
             authorization_deadline=(authorization_deadline or
                                     staged.authorization_deadline),
+            signal_policy=policy,
             **materialise_kwargs)
         self._staged[key] = staged
         if not staged.economic_condition_passed:
@@ -980,6 +1025,29 @@ class Executor:
                     "reason": "new entries frozen while execution reconciliation is unresolved",
                     "blockers": [{"client_order_id": b.get("client_order_id"),
                                   "status": b.get("status")} for b in blockers]}
+        try:
+            fresh_signal = (signal_revalidator() if callable(signal_revalidator)
+                            else signal_verdict)
+        except Exception as exc:
+            fresh_signal = {
+                "status": "waiting_data",
+                "reason": f"signal revalidation unavailable: {type(exc).__name__}",
+            }
+        if policy and str((fresh_signal or {}).get("status")) != "passed":
+            return {
+                "status": "signal_not_met",
+                "reason": str((fresh_signal or {}).get("reason") or
+                              "fresh entry signal was not revalidated"),
+                "signal_verdict": dict(fresh_signal or {}),
+                "checklist": staged.checklist(),
+            }
+        allowed, reason = entry_submission_allowed(self._submission_now(now))
+        if not allowed:
+            self._staged.pop(key, None)
+            return {"status": "entry_window_closed", "reason": reason,
+                    "qty": staged.verified.qty,
+                    "limit_price": staged.verified.limit_price,
+                    "checklist": staged.checklist()}
         legs = [{"symbol": l.symbol, "ratio_qty": str(l.ratio_qty), "side": l.side,
                  "position_intent": l.position_intent} for l in v.intent.legs]
         coid = v.client_order_id()
@@ -1014,6 +1082,9 @@ class Executor:
     def execute_authorized(self, intent: TradeIntent, *, trigger_id: str,
                            economic_condition: dict,
                            authorization_deadline: dt.datetime,
+                           signal_policy: dict | None = None,
+                           signal_verdict: dict | None = None,
+                           signal_revalidator=None,
                            now: dt.datetime | None = None,
                            **materialise_kwargs) -> dict:
         """Execute a previously authorized one-shot trigger from fresh state.
@@ -1071,6 +1142,28 @@ class Executor:
                         "client_order_id": coid,
                         "order_id": prior.get("order_id"),
                         "broker_status": prior.get("status")}
+        try:
+            fresh_signal = (signal_revalidator() if callable(signal_revalidator)
+                            else signal_verdict)
+        except Exception as exc:
+            fresh_signal = {
+                "status": "waiting_data",
+                "reason": f"signal revalidation unavailable: {type(exc).__name__}",
+            }
+        if signal_policy and str((fresh_signal or {}).get("status")) != "passed":
+            return {
+                "status": "signal_not_met",
+                "reason": str((fresh_signal or {}).get("reason") or
+                              "fresh entry signal was not revalidated"),
+                "signal_verdict": dict(fresh_signal or {}),
+                "checklist": staged.checklist(),
+            }
+        allowed, reason = entry_submission_allowed(self._submission_now(now))
+        if not allowed:
+            return {"status": "entry_window_closed", "reason": reason,
+                    "qty": staged.verified.qty,
+                    "limit_price": staged.verified.limit_price,
+                    "checklist": staged.checklist()}
         legs = [{"symbol": leg.symbol, "ratio_qty": str(leg.ratio_qty),
                  "side": leg.side, "position_intent": leg.position_intent}
                 for leg in v.intent.legs]

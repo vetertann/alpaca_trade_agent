@@ -26,6 +26,33 @@ MEASUREMENT_END = dt.datetime(2026, 9, 4, 9, 30, tzinfo=ET)
 # at Thursday EOD, not at Friday's post-window snapshot timestamp.
 WINDOW_CLOSE = EOD_EQUITY_MARK
 
+# Entry admission is deliberately separate from session close and from exit
+# enforcement.  Normal sessions stop adding risk at 15:45 ET; on the final
+# scored session the book may still add risk until 15:55 ET.  The same values
+# are consumed by the decision loop, preflight and the broker-submit boundary.
+ENTRY_OPEN_ET = dt.time(9, 45)
+ENTRY_CUTOFF_ET = dt.time(15, 45)
+FINAL_ENTRY_CUTOFF_ET = dt.time(15, 55)
+
+
+def entry_cutoff_et(day: dt.date) -> dt.time:
+    return FINAL_ENTRY_CUTOFF_ET if day == WINDOW_CLOSE.date() else ENTRY_CUTOFF_ET
+
+
+def entry_submission_allowed(now: dt.datetime | None = None) -> tuple[bool, str]:
+    """Last host-owned guard before any new-entry broker submission."""
+    now_et = (now or dt.datetime.now(dt.timezone.utc)).astimezone(ET)
+    if not in_scored_window(now_et):
+        return False, "outside the scored window"
+    if now_et.weekday() >= 5:
+        return False, "not a trading day"
+    cutoff = entry_cutoff_et(now_et.date())
+    if now_et.time() < ENTRY_OPEN_ET:
+        return False, f"new entries open at {ENTRY_OPEN_ET.strftime('%H:%M')} ET"
+    if now_et.time() >= cutoff:
+        return False, f"new entries closed at {cutoff.strftime('%H:%M')} ET"
+    return True, "entry window active"
+
 # Total equity, not realised cash, is scored at WINDOW_CLOSE.  Contract expiry is
 # therefore not an eligibility boundary: any active broker-listed option can
 # contribute marked value at the score horizon.  Liquidity, score-window

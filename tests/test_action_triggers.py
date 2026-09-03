@@ -74,6 +74,7 @@ def test_store_is_durable_removable_and_expires(tmp_path):
         intent(), condition=entry_condition(max_entry_debit=2.6),
         valid_for_seconds=60, reference_spot=772,
         max_spot_drift_pct=0.3, evidence={"candidate": "exact"},
+        signal_policy={"mode": "direction_agnostic"},
         reason="buy only at reviewed economics", now=NOW)
 
     assert row["purpose"] == "entry" and row["seconds_remaining"] == 60

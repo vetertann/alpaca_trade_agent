@@ -4,7 +4,7 @@
 A separate process on purpose: the agent itself listens on nothing, and this only
 ever reads the JSONL trace it writes. It cannot place, cancel, or influence a trade.
 
-    PYTHONPATH=src .venv/bin/python scripts/panel.py --run-dir .run/live --port 3001
+    PYTHONPATH=src .venv/bin/python scripts/panel.py --run-dir .run/live --port 7001
 """
 from __future__ import annotations
 
@@ -444,7 +444,7 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", default=".run/live")
-    ap.add_argument("--port", type=int, default=3001)
+    ap.add_argument("--port", type=int, default=7001)
     ap.add_argument("--host", default="127.0.0.1",
                     help="127.0.0.1 by default; use 0.0.0.0 only behind a firewall rule")
     args = ap.parse_args()
