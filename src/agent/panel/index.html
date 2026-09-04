@@ -55,8 +55,9 @@
   .proof b { color:var(--fg); font-weight:500; }
   .big { font-size:22px; letter-spacing:-.01em; white-space:nowrap; }
   .big .pct { font-size:12px; }
-  .row { display:grid; grid-template-columns:repeat(4,auto); gap:0 26px;
+  .row { display:grid; grid-template-columns:repeat(6,auto); gap:0 24px;
          align-items:end; justify-content:start; }
+  .big.secondary { font-size:17px; }
   @media (max-width:520px) { .row { grid-template-columns:repeat(2,auto); gap:14px 26px; } }
   svg { display:block; width:100%; height:120px; overflow:visible; margin-top:4px; }
   .log { max-height:520px; overflow-y:auto; }
@@ -118,6 +119,8 @@
   <div class="row">
     <div><div class="label">equity</div><div class="big" id="eq">—</div></div>
     <div><div class="label">p&amp;l</div><div class="big" id="pnl">—</div></div>
+    <div><div class="label">max p&amp;l</div><div class="big secondary" id="max-pnl">—</div></div>
+    <div><div class="label">min p&amp;l</div><div class="big secondary" id="min-pnl">—</div></div>
     <div><div class="label">session</div><div class="big" id="ses">—</div></div>
     <div><div class="label">cycles</div><div class="big" id="cyc">—</div></div>
   </div>
@@ -210,6 +213,14 @@ function chartStamp(value) {
   });
 }
 
+function etStamp(value) {
+  if (!value) return "—";
+  return new Date(value).toLocaleString("en-US", {
+    timeZone:"America/New_York", month:"short", day:"2-digit",
+    hour:"2-digit", minute:"2-digit", hour12:false, timeZoneName:"short"
+  });
+}
+
 function renderChart() {
   if (!latestState) return;
   const recent = latestState.equity_series || [];
@@ -217,7 +228,7 @@ function renderChart() {
   const points = chartRange === "full" ? full : recent;
   chart(points, latestState.starting || 100000);
   $("chart-label").textContent = chartRange === "full"
-    ? "equity, full scored window" : "equity, recent";
+    ? "equity, official period" : "equity, recent official marks";
   document.querySelectorAll("[data-chart-range]").forEach(button => {
     button.classList.toggle("active", button.dataset.chartRange === chartRange);
   });
@@ -429,21 +440,31 @@ async function tick() {
     const s = await r.json();
     const risk = s.robust_risk_pct == null ? "" : ` · robust ${(100*s.robust_risk_pct).toFixed(0)}%`;
     const scenario = s.scenario_risk_pct == null ? "" : ` · scenario ${(100*s.scenario_risk_pct).toFixed(1).replace(".0","")}%`;
-    $("hdr").textContent = `· ${s.profile}/${s.mode}${risk}${scenario} · ${s.model||"—"} · ${clock(s.now)}`;
-    $("eq").textContent  = s.equity ? money(s.equity) : "—";
+    const snapshotClock = s.frozen_at || s.data_through || s.now;
+    $("hdr").textContent = `· official snapshot · ${s.profile}/${s.mode}${risk}${scenario} · ${s.model||"—"} · ${etStamp(snapshotClock)}`;
+    $("eq").textContent  = s.equity != null ? money(s.equity) : "—";
     const p = s.equity - s.starting;
-    $("pnl").innerHTML = s.equity
+    $("pnl").innerHTML = s.equity != null
       ? `<span class="${cls(p)}">${sign(p)}${money(Math.abs(p)).replace("−","")}` +
         ` <span class="dim pct">${sign(p)}${Math.abs(p/s.starting*100).toFixed(2)}%</span></span>`
       : "—";
+    const extrema = s.period_extrema || {};
+    const maxPnl = extrema.max_pnl;
+    const minPnl = extrema.min_pnl;
+    $("max-pnl").innerHTML = maxPnl == null ? "—"
+      : `<span class="${cls(maxPnl)}">${sign(maxPnl)}${money(Math.abs(maxPnl)).replace("−","")}</span>`;
+    $("min-pnl").innerHTML = minPnl == null ? "—"
+      : `<span class="${cls(minPnl)}">${sign(minPnl)}${money(Math.abs(minPnl)).replace("−","")}</span>`;
     $("ses").innerHTML = `<span class="${s.session==='ACTIVE'?'':'dim'}">${(s.session||"—").toLowerCase()}</span>`;
     $("cyc").textContent = s.cycles ?? "—";
     const ctl = s.execution_control || {};
     const blockers = ctl.blockers || [];
     const sr = s.portfolio_scenario_risk || ctl.portfolio_scenario_risk || {};
     const restricted = !!ctl.risk_reducing_only || sr.breached === true;
-    $("control").className = "control" + ((ctl.entries_frozen || restricted) ? " bad" : "");
-    $("control").textContent = ctl.entries_frozen
+    $("control").className = "control" + ((!s.frozen && (ctl.entries_frozen || restricted)) ? " bad" : "");
+    $("control").textContent = s.frozen
+      ? `official result frozen · Thursday 3 September, 16:00 ET · data through ${etStamp(s.data_through)}`
+      : ctl.entries_frozen
       ? `execution control · ENTRIES FROZEN${ctl.latched?" (LATCHED)":""} · `
         + blockers.map(b=>`${b.status}:${b.client_order_id||"unknown"}`).join(", ")
       : restricted

@@ -17,8 +17,7 @@ from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent.brain.loop import session_state
-from agent.config import ET, MEASUREMENT_END, WINDOW_OPEN
+from agent.config import ET, WINDOW_CLOSE, WINDOW_OPEN
 
 PANEL = Path(__file__).resolve().parents[1] / "src" / "agent" / "panel" / "index.html"
 MAX_LOG = 60
@@ -58,8 +57,18 @@ def _records(path: Path) -> list[dict]:
     return list(_iter_records(path))
 
 
-def _shadow(run_dir: Path) -> list[dict]:
-    """Latest line of the shadow ledger: fixed policies run against the same quotes."""
+def _record_time(record: dict) -> dt.datetime | None:
+    try:
+        stamp = dt.datetime.fromisoformat(str(record["ts"]).replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=ET)
+        return stamp.astimezone(ET)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _shadow(run_dir: Path, cutoff: dt.datetime = WINDOW_CLOSE) -> list[dict]:
+    """Last shadow mark at the frozen official-equity cutoff."""
     path = run_dir / "shadow.jsonl"
     if not path.exists():
         return []
@@ -67,7 +76,10 @@ def _shadow(run_dir: Path) -> list[dict]:
     for line in path.read_text(errors="replace").splitlines():
         if line.strip():
             try:
-                last = json.loads(line)
+                candidate = json.loads(line)
+                when = _record_time(candidate)
+                if when is not None and when <= cutoff:
+                    last = candidate
             except json.JSONDecodeError:
                 pass
     if not last:
@@ -85,12 +97,12 @@ def _number(value) -> str:
 
 
 def _in_scored_window(point: dict) -> bool:
-    """Whether an equity mark belongs to the official measurement window."""
+    """Whether an equity mark belongs to the frozen official equity period."""
     try:
         stamp = dt.datetime.fromisoformat(str(point["t"]).replace("Z", "+00:00"))
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=ET)
-        return WINDOW_OPEN <= stamp.astimezone(ET) <= MEASUREMENT_END
+        return WINDOW_OPEN <= stamp.astimezone(ET) <= WINDOW_CLOSE
     except (KeyError, TypeError, ValueError):
         return False
 
@@ -176,8 +188,14 @@ def build_state(run_dir: Path) -> dict:
     no_trades = 0
     incomplete_cycles = 0
     reconciliations = 0
+    data_through = None
 
     for r in _iter_records(run_dir / "trace.jsonl"):
+        record_at = _record_time(r)
+        if (record_at is None or record_at < WINDOW_OPEN
+                or record_at > WINDOW_CLOSE):
+            continue
+        data_through = record_at
         kind = r.get("kind")
         if r.get("cycle"):
             cycles.add(r["cycle"])
@@ -236,12 +254,13 @@ def build_state(run_dir: Path) -> dict:
             starting = float((b.get("account") or {}).get("starting_equity") or starting)
             if eq:
                 equity_series.append({"t": r["ts"], "v": float(eq)})
-            positions = b.get("book") or positions
+            if "book" in b:
+                positions = b.get("book") or []
 
         elif kind == "RECONCILE" and r.get("equity"):
             equity_series.append({"t": r["ts"], "v": float(r["equity"])})
-            if not has_portfolio_marks:
-                positions = r.get("positions") or positions
+            if not has_portfolio_marks and "positions" in r:
+                positions = r.get("positions") or []
 
         elif kind == "PORTFOLIO":
             snapshot = r.get("snapshot") or {}
@@ -254,7 +273,8 @@ def build_state(run_dir: Path) -> dict:
                 equity_series.append({"t": r["ts"], "v": float(snapshot["equity"])})
             # Prefer normalized structures over raw broker legs. This also keeps
             # the UI's labels and P&L aligned with what the agent can close.
-            positions = snapshot.get("structures") or positions
+            if "structures" in snapshot:
+                positions = snapshot.get("structures") or []
 
         elif kind == "TRIGGER":
             log.append({"cycle": r.get("cycle"), "ts": r["ts"], "kind": "TRIGGER",
@@ -370,7 +390,7 @@ def build_state(run_dir: Path) -> dict:
 
     refusal_counts = collections.Counter(name for _, name in refusal_events)
     proof = {
-        "scope": "current_trace_file",
+        "scope": "official_period_through_thursday_close",
         "cycles": len(cycles),
         "no_trades": no_trades,
         "incomplete_cycles": incomplete_cycles,
@@ -390,13 +410,25 @@ def build_state(run_dir: Path) -> dict:
 
     equity = equity_series[-1]["v"] if equity_series else None
     scored_equity = [point for point in equity_series if _in_scored_window(point)]
-    # Old/development traces can sit outside the fixed competition dates. Keep the
-    # panel useful for those traces while making the live chart precisely scoped.
-    full_equity = scored_equity or equity_series
+    full_equity = scored_equity
+    extrema = {}
+    if full_equity:
+        high = max(full_equity, key=lambda point: float(point["v"]))
+        low = min(full_equity, key=lambda point: float(point["v"]))
+        extrema = {
+            "max_equity": float(high["v"]),
+            "max_pnl": round(float(high["v"]) - starting, 2),
+            "max_at": high["t"],
+            "min_equity": float(low["v"]),
+            "min_pnl": round(float(low["v"]) - starting, 2),
+            "min_at": low["t"],
+        }
     return {"now": now.isoformat(), "profile": profile, "mode": mode, "model": model,
+            "frozen": True, "frozen_at": WINDOW_CLOSE.isoformat(),
+            "data_through": data_through.isoformat() if data_through else None,
             "robust_risk_pct": robust_risk_pct,
             "scenario_risk_pct": scenario_risk_pct,
-            "session": session_state(now), "cycles": len(cycles),
+            "session": "FROZEN", "cycles": len(cycles),
             "equity": equity, "starting": starting,
             "equity_series": equity_series[-MAX_RECENT_EQUITY_POINTS:],
             "equity_series_full": _downsample_equity(
@@ -404,9 +436,11 @@ def build_state(run_dir: Path) -> dict:
             "positions": [_portfolio_row(p) for p in positions],
             "execution_control": execution_control,
             "portfolio_scenario_risk": portfolio_scenario_risk,
+            "period_extrema": extrema,
             "action_triggers": action_triggers,
             "proof": proof,
-            "usage": usage, "shadow": _shadow(run_dir), "cycle_log": cycles_out}
+            "usage": usage, "shadow": _shadow(run_dir, WINDOW_CLOSE),
+            "cycle_log": cycles_out}
 
 
 class Handler(BaseHTTPRequestHandler):

@@ -27,7 +27,7 @@ when the relevant execution semantics changed.
 ```bash
 cd /Users/ivan/Documents/Hackatons/Alpaca
 set -a; . ./.env; set +a
-.venv/bin/python -m pytest tests/ -q          # expect 515 passed
+.venv/bin/python -m pytest tests/ -q          # expect 517 passed
 alpaca version                                # v0.0.14; /usr/local/bin/alpaca on VM
 ```
 

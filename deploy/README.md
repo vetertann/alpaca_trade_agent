@@ -86,9 +86,11 @@ cannot hammer Alpaca.
 
 ## Panel
 
-A read-only view of the agent, served by a separate process. It reads the JSONL
-trace and nothing else — it cannot place, cancel, or influence a trade, and `POST`
-returns 405.
+A read-only official-result view, served by a separate process. It freezes equity,
+portfolio, decisions and proof at Thursday 3 September 16:00 ET, and reports the
+final, maximum and minimum P&L observed during the official period. Later paper
+activity remains in the durable trace but cannot change the submitted dashboard.
+The panel cannot place, cancel, or influence a trade, and `POST` returns 405.
 
 Locally:
 

@@ -54,7 +54,7 @@ prints the gate checklist without submitting; `--mode execute` submits.
 `--dev-models` routes to cheap Nebius models for build-and-test iteration.
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # 515 passed
+.venv/bin/python -m pytest tests/ -q          # 517 passed
 ```
 
 Deploy the competition agent to the server. The trading process itself listens on
@@ -68,10 +68,14 @@ The live VPS runs one judged trading process:
 
 | Role | Agent unit | Directory | Risk ceiling | Read-only panel |
 |---|---|---|---:|---:|
-| Competition, the only judged account | `alpaca-agent.service` | `/opt/alpaca-agent` | 4% robust / scenario ceiling | `:7001` |
+| Competition, the only judged account | `alpaca-agent.service` | `/opt/alpaca-agent` | balanced 10% robust / scenario ceiling | `:7001` |
 
 There must be only one stream-owning process for the account. Baseline comparisons
 run in-process as shadow policies and place no broker orders.
+
+The submitted panel is frozen at Thursday 3 September 16:00 ET. Its equity,
+portfolio, decisions and proof exclude later paper activity, and it reports final,
+maximum and minimum P&L across the official period.
 
 ## Design decisions worth naming
 
@@ -249,7 +253,7 @@ scripts/
   calibrate.py       live spread and volatility-state measurement
   estimate_cost.py   token and cost projection from measured usage
 deploy/              systemd unit, provisioning, deploy script
-tests/               515 passing tests
+tests/               517 passing tests
 ```
 
 Design detail lives in `ARCHITECTURE.md`. Operating procedure lives in `RUNBOOK.md`.

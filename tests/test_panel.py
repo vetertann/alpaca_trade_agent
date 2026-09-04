@@ -16,14 +16,14 @@ downsample_equity = _PANEL._downsample_equity
 def test_panel_exposes_the_instance_risk_variant(tmp_path):
     (tmp_path / "trace.jsonl").write_text(json.dumps({
         "ts": "2026-08-31T15:00:00+00:00", "kind": "NOTE",
-        "message": "started", "profile": "dev", "mode": "execute",
+        "message": "started", "profile": "competition", "mode": "execute",
         "model": "anthropic/claude-opus-5", "robust_risk_pct": 0.10,
         "scenario_risk_pct": 0.10,
     }) + "\n")
 
     state = build_state(tmp_path)
 
-    assert state["profile"] == "dev"
+    assert state["profile"] == "competition"
     assert state["robust_risk_pct"] == 0.10
     assert state["scenario_risk_pct"] == 0.10
 
@@ -62,6 +62,39 @@ def test_full_equity_downsampling_preserves_extrema_and_order():
     source_indices = {id(point): index for index, point in enumerate(points)}
     assert [source_indices[id(point)] for point in sampled] == sorted(
         source_indices[id(point)] for point in sampled)
+
+
+def test_panel_freezes_thursday_close_and_reports_period_pnl_extrema(tmp_path):
+    rows = [
+        {"ts": "2026-08-31T13:30:00+00:00", "kind": "PORTFOLIO",
+         "snapshot": {"equity": 100_000, "structures": []}},
+        {"ts": "2026-09-01T15:00:00+00:00", "kind": "PORTFOLIO",
+         "snapshot": {"equity": 101_250, "structures": []}},
+        {"ts": "2026-09-02T15:00:00+00:00", "kind": "PORTFOLIO",
+         "snapshot": {"equity": 97_900, "structures": []}},
+        {"ts": "2026-09-03T19:59:51+00:00", "kind": "PORTFOLIO",
+         "snapshot": {"equity": 98_887.29,
+                      "structures": [{"symbol": "THURSDAY_BOOK", "qty": 1}]}},
+        {"ts": "2026-09-04T15:00:00+00:00", "kind": "PORTFOLIO",
+         "snapshot": {"equity": 95_000,
+                      "structures": [{"symbol": "FRIDAY_BOOK", "qty": 2}]}},
+    ]
+    (tmp_path / "trace.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows))
+
+    state = build_state(tmp_path)
+
+    assert state["frozen"] is True
+    assert state["session"] == "FROZEN"
+    assert state["equity"] == 98_887.29
+    assert state["positions"][0]["symbol"] == "THURSDAY_BOOK"
+    assert len(state["equity_series_full"]) == 4
+    assert state["period_extrema"] == {
+        "max_equity": 101_250.0, "max_pnl": 1_250.0,
+        "max_at": "2026-09-01T15:00:00+00:00",
+        "min_equity": 97_900.0, "min_pnl": -2_100.0,
+        "min_at": "2026-09-02T15:00:00+00:00",
+    }
 
 
 def test_normalized_structures_render_as_strategy_rows(tmp_path):
@@ -132,6 +165,20 @@ def test_continuous_portfolio_marks_update_equity_and_strategy_rows(tmp_path):
     assert state["positions"][0]["symbol"] == "QQQ 707/717C · 09-01"
 
 
+def test_empty_final_portfolio_snapshot_clears_an_earlier_structure(tmp_path):
+    rows = [
+        {"ts": "2026-09-03T19:50:00+00:00", "kind": "PORTFOLIO",
+         "snapshot": {"equity": 99_000,
+                      "structures": [{"symbol": "SPY OLD", "qty": 1}]}},
+        {"ts": "2026-09-03T19:59:50+00:00", "kind": "PORTFOLIO",
+         "snapshot": {"equity": 99_100, "structures": []}},
+    ]
+    (tmp_path / "trace.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows))
+
+    assert build_state(tmp_path)["positions"] == []
+
+
 def test_panel_exposes_a_live_portfolio_scenario_breach(tmp_path):
     risk = {"status": "ok", "breached": True, "loss_dollars": 1700,
             "limit_dollars": 1500, "limit_pct_of_equity": 1.5}
@@ -200,7 +247,8 @@ def test_panel_builds_compact_trace_proof_counters(tmp_path):
     proof = build_state(tmp_path)["proof"]
 
     assert proof == {
-        "scope": "current_trace_file", "cycles": 1, "no_trades": 1,
+        "scope": "official_period_through_thursday_close", "cycles": 1,
+        "no_trades": 1,
         "incomplete_cycles": 0,
         "gate_refusals": 1,
         "gate_refusals_by_reason": {"portfolio_scenario": 1},

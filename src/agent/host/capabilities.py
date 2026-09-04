@@ -52,6 +52,17 @@ def _evenly_spaced(values: list[str], count: int) -> list[str]:
     return [values[i] for i in dict.fromkeys(indices)]
 
 
+def _candidate_horizon(candidate: cand.Candidate,
+                       context: dict | None = None) -> dict:
+    """Return the horizon bound when this candidate/measure was constructed."""
+    raw = (context or {}).get("evaluation_at") or candidate.detail.get("evaluation_at")
+    if raw:
+        reference = dt.datetime.fromisoformat(str(raw))
+    else:
+        reference = dt.datetime.now(dt.timezone.utc)
+    return score_horizon.candidate_horizon(candidate.expiry, reference)
+
+
 def _diverse(cands: list, limit: int) -> list:
     """Round-robin across expiries and families.
 
@@ -524,8 +535,7 @@ class Capabilities:
         if c is None:
             raise CapabilityError(f"unknown candidate {candidate_id!r}; call "
                                   "options.enumerate first")
-        horizon = score_horizon.candidate_horizon(
-            c.expiry, dt.datetime.now(dt.timezone.utc))
+        horizon = _candidate_horizon(c)
         return self._build_measure_handle(
             c.underlying, horizon["score_horizon_trading_days"], sigma, skew,
             horizon_source="candidate_score_horizon", candidate=candidate_id,
@@ -584,8 +594,7 @@ class Capabilities:
         out["evaluated_net_price"] = round(float(c.net_price), 6)
         out["max_loss"] = round(c.max_loss, 2)
         out["risk_reward"] = round(c.risk_reward, 3)
-        horizon = score_horizon.candidate_horizon(
-            c.expiry, dt.datetime.now(dt.timezone.utc))
+        horizon = _candidate_horizon(c, context)
         out.update({key: horizon[key] for key in (
             "evaluation_at", "score_horizon_trading_days",
             "residual_calendar_days_at_evaluation", "valuation_basis",
@@ -808,8 +817,7 @@ class Capabilities:
             }
             for label, move in scenario_moves.items()
         }
-        horizon = score_horizon.candidate_horizon(
-            c.expiry, dt.datetime.now(dt.timezone.utc))
+        horizon = _candidate_horizon(c)
         evaluation_at = dt.datetime.fromisoformat(horizon["evaluation_at"])
         if score_horizon.expiry_close(c.expiry) > evaluation_at:
             score_scenarios = {
